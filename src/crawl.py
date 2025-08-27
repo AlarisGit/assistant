@@ -28,6 +28,18 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
             for tag in soup.find_all(t):
                 tag.decompose()
 
+        # Remove H&M Navigation table: <table> containing <p class="crumbs"><b>Navigation:</b>
+        try:
+            for tbl in soup.find_all("table"):
+                p = tbl.find("p", class_="crumbs")
+                if not p:
+                    continue
+                b = p.find("b")
+                if b and "navigation:" in b.get_text(strip=True).lower():
+                    tbl.decompose()
+        except Exception:
+            pass
+
         # Promote explicit ARIA headings
         for el in soup.find_all(attrs={"role": "heading"}):
             try:
