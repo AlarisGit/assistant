@@ -106,7 +106,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
-IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "")
 
 logger.info("Configuration loaded.")
 
