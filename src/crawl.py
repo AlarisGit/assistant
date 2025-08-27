@@ -89,7 +89,7 @@ import config
 import logging
 import atexit
 import os
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, unquote
 import json
 import time
 from collections import deque
@@ -143,6 +143,41 @@ def _same_domain(url: str, base_netloc: str) -> bool:
         return False
 
 
+def _unwrap_index_like(url: str) -> str:
+    """Convert wrapper URLs like .../index.html?page.html or .../index.html?page=page.html to direct .../page.html.
+    Leaves other URLs untouched.
+    """
+    try:
+        p = urlparse(url)
+        if not p.query:
+            return url
+        if not p.path.lower().endswith("index.html"):
+            return url
+        candidate: str | None = None
+        q = p.query
+        if "=" in q:
+            qs = parse_qs(q, keep_blank_values=True)
+            for vals in qs.values():
+                for v in vals:
+                    v = unquote(v or "")
+                    if v and v.lower().endswith(".html"):
+                        candidate = v
+                        break
+                if candidate:
+                    break
+        else:
+            v = unquote(q)
+            if v and v.lower().endswith(".html"):
+                candidate = v
+        if not candidate:
+            return url
+        base_dir = os.path.dirname(p.path) or "/"
+        new_path = os.path.normpath(os.path.join(base_dir, candidate))
+        return p._replace(path=new_path, query="").geturl()
+    except Exception:
+        return url
+
+
 def _normalize_link(base_url: str, link: str) -> str | None:
     if not link:
         return None
@@ -151,6 +186,8 @@ def _normalize_link(base_url: str, link: str) -> str | None:
     if link.startswith(("javascript:", "mailto:", "tel:", "#")):
         return None
     abs_url = urljoin(base_url, link)
+    # Unwrap H&M style wrapper URLs like index.html?page.html -> page.html
+    abs_url = _unwrap_index_like(abs_url)
     # Remove fragment
     abs_url, _ = urldefrag(abs_url)
     return abs_url
@@ -485,6 +522,8 @@ def crawl_site(base_url: str, start_path: str = "/", max_pages: int = DEFAULT_MA
     pages_crawled = 0
     while q and pages_crawled < max_pages:
         url = q.popleft()
+        # Normalize wrapper URLs early so all processing uses direct page URL
+        url = _unwrap_index_like(url)
         if url in seen:
             continue
 
