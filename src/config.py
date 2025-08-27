@@ -80,10 +80,19 @@ else:
     logger.warning(f"Log directory {LOG_DIR} does not exist or is not writable. File logging disabled.")
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(project_root, 'data'))
+os.makedirs(DATA_DIR, exist_ok=True)
 if os.path.exists(DATA_DIR) and os.access(DATA_DIR, os.W_OK):
     logger.info(f"Data dir: {DATA_DIR}")
 else:
     logger.warning(f"Data directory {DATA_DIR} does not exist or is not writable.")
+    sys.exit(1)
+
+CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(project_root, 'cache'))
+os.makedirs(CACHE_DIR, exist_ok=True)
+if os.path.exists(CACHE_DIR) and os.access(CACHE_DIR, os.W_OK):
+    logger.info(f"Cache dir: {CACHE_DIR}")
+else:
+    logger.warning(f"Cache directory {CACHE_DIR} does not exist or is not writable.")
     sys.exit(1)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")

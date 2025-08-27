@@ -13,7 +13,8 @@ def _remove_bom_all(s: str | None) -> str | None:
 
 
 def _html_to_markdown_with_headings(html: str, page_title: str | None = None) -> str:
-    """Convert HTML to Markdown, promoting likely section title elements to headings.
+    """Convert HTML body to Markdown, promoting likely section title elements to headings.
+    Note: We intentionally do NOT prepend the page title; it is stored in metadata.
     - Elements with role="heading" (aria-level honored) become h1..h6
     - Elements with common title classes become h2
     - Uses ATX heading style (###)
@@ -72,32 +73,7 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
             heading_style="ATX",
             strip=["script", "style", "nav", "header", "footer", "noscript"],
         ).strip()
-        if page_title:
-            page_title = (_remove_bom_all(_strip_bom(page_title)) or page_title).strip()
-            # If there is already an H1 equal to page_title, skip prepending
-            existing_h1 = soup.find(["h1"])  # after promotions
-            existing_h1_text = existing_h1.get_text(strip=True) if existing_h1 else None
-            if not (existing_h1_text and existing_h1_text.strip() == page_title):
-                md = f"# {page_title}\n\n" + md
-        # Post-process: if first non-empty line is '# Title' and next non-empty equals 'Title', drop duplicate
-        lines = md.splitlines()
-        def first_nonempty_idx(lst):
-            for i, ln in enumerate(lst):
-                if ln.strip():
-                    return i
-            return -1
-        i1 = first_nonempty_idx(lines)
-        if i1 != -1 and lines[i1].startswith("# "):
-            title_text = lines[i1][2:].strip()
-            # find next non-empty line after i1
-            i2 = -1
-            for j in range(i1 + 1, len(lines)):
-                if lines[j].strip():
-                    i2 = j
-                    break
-            if i2 != -1 and lines[i2].strip() == title_text:
-                lines.pop(i2)
-        md = "\n".join(lines)
+        # No title prepend, no de-duplication: title is stored in metadata only
         # TOC formatting improvements:
         # 1) Remove javascript:void(...) targets left by nav elements
         md = re.sub(r"\(javascript:[^)]*\)", "", md)
@@ -133,6 +109,12 @@ md_root_dir = os.path.join(config.DATA_DIR, "md")
 os.makedirs(html_root_dir, exist_ok=True)
 os.makedirs(images_root_dir, exist_ok=True)
 os.makedirs(md_root_dir, exist_ok=True)
+# Cache directories for raw, unprocessed content
+cache_root_dir = os.path.join(config.CACHE_DIR, "raw")
+cache_html_dir = os.path.join(cache_root_dir, "html")
+cache_images_dir = os.path.join(cache_root_dir, "images")
+os.makedirs(cache_html_dir, exist_ok=True)
+os.makedirs(cache_images_dir, exist_ok=True)
 # A single combined index for all crawls
 ulrs_file = os.path.join(html_root_dir, "urls.json")
 
@@ -265,22 +247,144 @@ def _save_image(target_dir: str, url: str, content: bytes, headers: dict) -> str
     return full_path
 
 
+# ----------------------
+# Cache helper functions
+# ----------------------
+def _cache_html_paths(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+    domain_dir = os.path.join(cache_html_dir, parsed.netloc)
+    path = parsed.path
+    if not path or path.endswith("/"):
+        path = path + "index.html"
+    filename = path.lstrip("/")
+    if parsed.query:
+        safe_query = re.sub(r"[^A-Za-z0-9._-]", "_", parsed.query)
+        if filename.endswith(".html"):
+            filename = filename[:-5] + f"_{safe_query}.html"
+        else:
+            filename = filename + f"_{safe_query}.html"
+    full_path = os.path.join(domain_dir, filename)
+    headers_path = full_path + ".headers.json"
+    return full_path, headers_path
+
+
+def _cache_image_paths(url: str, headers: dict | None) -> tuple[str, str]:
+    parsed = urlparse(url)
+    domain_dir = os.path.join(cache_images_dir, parsed.netloc)
+    path = parsed.path
+    if not path or path.endswith("/"):
+        ext = ""
+        ctype = (headers or {}).get("Content-Type", "").lower()
+        if ctype.startswith("image/"):
+            ext = "." + ctype.split("/", 1)[1].split(";")[0].strip()
+            if ext == ".jpeg":
+                ext = ".jpg"
+        path = (path or "/") + f"image{ext or '.bin'}"
+    filename = path.lstrip("/")
+    if parsed.query:
+        safe_query = re.sub(r"[^A-Za-z0-9._-]", "_", parsed.query)
+        name, ext = os.path.splitext(filename)
+        filename = f"{name}_{safe_query}{ext or ''}"
+    full_path = os.path.join(domain_dir, filename)
+    headers_path = full_path + ".headers.json"
+    return full_path, headers_path
+
+
+def _cache_get_html(url: str) -> tuple[bytes | None, dict | None]:
+    fpath, hpath = _cache_html_paths(url)
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "rb") as f:
+                data = f.read()
+            headers = {}
+            if os.path.exists(hpath):
+                with open(hpath, "r", encoding="utf-8") as hf:
+                    headers = json.load(hf)
+            return data, headers
+        except Exception:
+            return None, None
+    return None, None
+
+
+def _cache_set_html(url: str, content: bytes, headers: dict):
+    fpath, hpath = _cache_html_paths(url)
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+    try:
+        with open(fpath, "wb") as f:
+            f.write(content)
+        with open(hpath, "w", encoding="utf-8") as hf:
+            json.dump(headers, hf)
+    except Exception as e:
+        logger.debug(f"Failed to write HTML cache for {url}: {e}")
+
+
+def _cache_get_image(url: str) -> tuple[bytes | None, dict | None, str | None]:
+    parsed = urlparse(url)
+    base_dir = os.path.join(cache_images_dir, parsed.netloc)
+    path = parsed.path
+    if not path or path.endswith("/"):
+        path = (path or "/") + "image"
+    filename = path.lstrip("/")
+    if parsed.query:
+        safe_query = re.sub(r"[^A-Za-z0-9._-]", "_", parsed.query)
+        name, ext = os.path.splitext(filename)
+        filename = f"{name}_{safe_query}{ext or ''}"
+    base = os.path.join(base_dir, filename)
+    for ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".tif", ".tiff", ".ico", ".heic", ".heif", ".bin"):
+        fpath = base if base.endswith(ext) else base + ext
+        hpath = fpath + ".headers.json"
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "rb") as f:
+                    data = f.read()
+                headers = {}
+                if os.path.exists(hpath):
+                    with open(hpath, "r", encoding="utf-8") as hf:
+                        headers = json.load(hf)
+                return data, headers, fpath
+            except Exception:
+                continue
+    return None, None, None
+
+
+def _cache_set_image(url: str, content: bytes, headers: dict):
+    fpath, hpath = _cache_image_paths(url, headers)
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+    try:
+        with open(fpath, "wb") as f:
+            f.write(content)
+        with open(hpath, "w", encoding="utf-8") as hf:
+            json.dump(headers, hf)
+    except Exception as e:
+        logger.debug(f"Failed to write image cache for {url}: {e}")
+
+
 def _fetch(url: str) -> tuple[int | None, str | None, dict]:
     headers = {"User-Agent": USER_AGENT}
     try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-        hdrs = dict(resp.headers)
-        if not _is_html_response(resp):
-            return resp.status_code, None, hdrs
+        # Try cache first
+        raw_cached, hdrs_cached = _cache_get_html(url)
+        if raw_cached is not None and isinstance(hdrs_cached, dict):
+            hdrs = hdrs_cached
+            status_code = 200
+            raw = raw_cached
+        else:
+            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            hdrs = dict(resp.headers)
+            if not _is_html_response(resp):
+                return resp.status_code, None, hdrs
+            raw = resp.content or b""
+            # Save to cache
+            _cache_set_html(url, raw, hdrs)
+            status_code = resp.status_code
         # Decode bytes robustly, honoring BOM when present
-        raw = resp.content or b""
         text = None
         try:
             # If starts with UTF-8 BOM, decode with utf-8-sig to strip it
             if raw.startswith(b"\xef\xbb\xbf"):
                 text = raw.decode("utf-8-sig", errors="replace")
             else:
-                enc = resp.encoding or requests.utils.get_encoding_from_headers(resp.headers) or "utf-8"
+                enc = requests.utils.get_encoding_from_headers(hdrs) or "utf-8"
                 # Normalize common enc labels
                 if enc.lower() in ("utf8", "utf-8"):
                     # ensure BOM would be removed if present (handled above)
@@ -294,7 +398,7 @@ def _fetch(url: str) -> tuple[int | None, str | None, dict]:
             text = raw.decode("utf-8", errors="replace")
         # Final cleanup of U+FEFF anywhere
         text = _remove_bom_all(_strip_bom(text)) or ""
-        return resp.status_code, text, hdrs
+        return status_code, text, hdrs
     except requests.RequestException as e:
         logger.warning(f"Request failed for {url}: {e}")
         return None, None, {}
@@ -437,9 +541,13 @@ def crawl_site(base_url: str, start_path: str = "/", max_pages: int = DEFAULT_MA
                     logger.debug(f"Blocked image by robots.txt: {img_url}")
                     continue
                 try:
-                    r = requests.get(img_url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, stream=True)
-                    content = r.content
-                    headers_final = dict(r.headers)
+                    # Try cache first
+                    content, headers_final, fpath = _cache_get_image(img_url)
+                    if content is None:
+                        r = requests.get(img_url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, stream=True)
+                        content = r.content
+                        headers_final = dict(r.headers)
+                        _cache_set_image(img_url, content, headers_final)
                     if _is_image_request(img_url, headers_final):
                         img_path = _save_image(site_images_dir, img_url, content, headers_final)
                         meta["images_saved"].append(os.path.relpath(img_path, images_root_dir))
