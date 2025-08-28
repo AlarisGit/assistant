@@ -95,20 +95,31 @@ else:
     logger.warning(f"Cache directory {CACHE_DIR} does not exist or is not writable.")
     sys.exit(1)
 
+PROMPTS_DIR = os.getenv("PROMPTS_DIR", os.path.join(project_root, 'prompts'))
+if os.path.exists(PROMPTS_DIR):
+    logger.info(f"Prompts dir: {PROMPTS_DIR}")
+else:
+    logger.warning(f"Prompts directory {PROMPTS_DIR} does not exist.")
+    sys.exit(1)
+
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", 11434))
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llava:7b")
-OLLAMA_IMAGE_MODEL = os.getenv("OLLAMA_IMAGE_MODEL", "llava:7b")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
-OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+SUM_MODEL = os.getenv("SUM_MODEL", "gpt-oss-20b@ollama")
+EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-large@openai")
+#VSN_MODEL = os.getenv("VSN_MODEL", "llava:7b@ollama")
+VSN_MODEL = os.getenv("VSN_MODEL", "gemma3:27b@ollama")
+RSP_MODEL = os.getenv("RSP_MODEL", "gpt-5-nano@openai")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
-QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "docparser")
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "assistant")
 
 MIN_CHUNK_TOKENS = int(os.getenv("MIN_CHUNK_TOKENS", 20))
+OVERLAP_CHUNK_TOKENS = int(os.getenv("OVERLAP_CHUNK_TOKENS", 100))
 MAX_CHUNK_TOKENS = int(os.getenv("MAX_CHUNK_TOKENS", 300))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
