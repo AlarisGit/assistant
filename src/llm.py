@@ -1,77 +1,493 @@
 import config
 import logging
+import os
+import base64
+import requests
+import mimetypes
+from typing import List, Dict, Any, Optional, Tuple
+from abc import ABC, abstractmethod
+from openai import OpenAI
+import google.generativeai as genai
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+class BaseProvider(ABC):
+    """Base class for LLM providers with unified interface"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
+    @abstractmethod
+    def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                     image: str = '', **kwargs) -> str:
+        """Generate text response (supports both text and image inputs)"""
+        pass
+    
+    @abstractmethod
+    def generate_embedding(self, text: str, model: str, **kwargs) -> List[float]:
+        """Generate text embedding"""
+        pass
+
+
+class OpenAIProvider(BaseProvider):
+    """OpenAI provider using latest responses API with reasoning"""
+    
+    def __init__(self, api_key: str):
+        super().__init__(api_key)
+        self.client = OpenAI(api_key=api_key)
+    
+    def _is_reasoning_model(self, model: str) -> bool:
+        """Check if model is a reasoning model"""
+        reasoning_models = ['o1', 'o3', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano']
+        return any(rm in model.lower() for rm in reasoning_models)
+    
+    def _is_gpt5_model(self, model: str) -> bool:
+        """Check if model is GPT-5"""
+        return 'gpt-5' in model.lower()
+    
+    def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                     image: str = '', model: str = 'gpt-5-nano', reasoning_effort: str = 'medium', 
+                     max_output_tokens: Optional[int] = None, use_responses_api: bool = None, **kwargs) -> str:
+        """Generate text using OpenAI API with proper reasoning support"""
+        
+        is_reasoning = self._is_reasoning_model(model)
+        is_gpt5 = self._is_gpt5_model(model)
+        
+        # Auto-detect responses API usage - disable for vision tasks for now
+        if use_responses_api is None:
+            use_responses_api = is_reasoning and not image
+        
+        # Validate reasoning_effort for GPT-5
+        if is_gpt5 and reasoning_effort not in ['minimal', 'low', 'medium', 'high']:
+            reasoning_effort = 'medium'
+        elif not is_gpt5 and reasoning_effort == 'minimal':
+            reasoning_effort = 'medium'  # Fallback for non-GPT-5 models
+        
+        try:
+            if use_responses_api:
+                return self._generate_with_responses_api(
+                    prompt, system_prompt, history, image, model, 
+                    reasoning_effort, max_output_tokens, **kwargs
+                )
+            else:
+                return self._generate_with_chat_completions(
+                    prompt, system_prompt, history, image, model, 
+                    max_output_tokens, **kwargs
+                )
+        except Exception as e:
+            self.logger.error(f"OpenAI API error: {e}")
+            raise
+    
+    def _generate_with_responses_api(self, prompt: str, system_prompt: str, 
+                                   history: List[Tuple[str, str]], image: str, model: str,
+                                   reasoning_effort: str, max_output_tokens: Optional[int], **kwargs) -> str:
+        """Generate using responses API for reasoning models"""
+        input_messages = self._build_input_messages(prompt, system_prompt, history, image)
+        
+        params = {
+            "model": model,
+            "input": input_messages,
+            "reasoning": {
+                "effort": reasoning_effort
+            }
+        }
+        
+        # Note: verbosity parameter not yet supported in OpenAI API
+        # Will be added when available
+        
+        if max_output_tokens:
+            params["max_output_tokens"] = max_output_tokens
+        
+        # Add tools if specified
+        if 'tools' in kwargs:
+            params["tools"] = kwargs['tools']
+        if 'tool_choice' in kwargs:
+            params["tool_choice"] = kwargs['tool_choice']
+        
+        response = self.client.responses.create(**params)
+        
+        # Extract text from response output
+        for output in response.output:
+            if output.type == 'message' and hasattr(output, 'content'):
+                for content in output.content:
+                    if hasattr(content, 'text'):
+                        return content.text
+        
+        return "No response content found"
+    
+    def _generate_with_chat_completions(self, prompt: str, system_prompt: str,
+                                      history: List[Tuple[str, str]], image: str, model: str,
+                                      max_output_tokens: Optional[int], **kwargs) -> str:
+        """Generate using chat completions API for non-reasoning models"""
+        messages = self._build_messages(prompt, system_prompt, history, image)
+        
+        params = {
+            "model": model,
+            "messages": messages
+        }
+        
+        # Only add supported parameters for non-reasoning models
+        if max_output_tokens:
+            params["max_tokens"] = max_output_tokens
+        
+        # Add optional parameters that are supported
+        supported_params = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 
+                          'logprobs', 'top_logprobs', 'logit_bias', 'tools', 'tool_choice']
+        for param in supported_params:
+            if param in kwargs:
+                params[param] = kwargs[param]
+        
+        response = self.client.chat.completions.create(**params)
+        return response.choices[0].message.content
+    
+    def generate_embedding(self, text: str, model: str = 'text-embedding-3-large', **kwargs) -> List[float]:
+        """Generate embedding using OpenAI API"""
+        try:
+            response = self.client.embeddings.create(input=text, model=model)
+            return response.data[0].embedding
+        except Exception as e:
+            self.logger.error(f"OpenAI embedding error: {e}")
+            raise
+    
+    
+    def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str) -> List[Dict[str, Any]]:
+        """Build OpenAI message format for chat completions"""
+        messages = []
+        
+        # Add system prompt
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        # Add conversation history
+        for user_msg, assistant_msg in history:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": assistant_msg})
+        
+        # Build current user message with optional image
+        content = [{"type": "text", "text": prompt}]
+        
+        if image:
+            if image.startswith(('http://', 'https://')):
+                content.append({"type": "image_url", "image_url": {"url": image}})
+            else:
+                # Expand tilde and resolve path
+                image_path = os.path.expanduser(image)
+                mime_type, _ = mimetypes.guess_type(image_path)
+                mime_type = mime_type or 'image/jpeg'
+                with open(image_path, 'rb') as f:
+                    base64_image = base64.b64encode(f.read()).decode('utf-8')
+                content.append({
+                    "type": "image_url", 
+                    "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
+                })
+        
+        messages.append({"role": "user", "content": content})
+        return messages
+    
+    def _build_input_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str) -> List[Dict[str, Any]]:
+        """Build input messages for responses API"""
+        messages = []
+        
+        # For reasoning models, use developer messages instead of system messages
+        if system_prompt:
+            messages.append({"role": "developer", "content": system_prompt})
+        
+        # Add conversation history
+        for user_msg, assistant_msg in history:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": assistant_msg})
+        
+        # Build current user message with optional image
+        if image:
+            # For responses API with images, use simple text format for now
+            messages.append({"role": "user", "content": f"{prompt}\n[Image provided but not supported in responses API yet]"})
+        else:
+            messages.append({"role": "user", "content": prompt})
+        
+        return messages
+
+
+class GoogleProvider(BaseProvider):
+    """Google Gemini provider with thinking budget configuration"""
+    
+    def __init__(self, api_key: str):
+        super().__init__(api_key)
+        genai.configure(api_key=api_key)
+    
+    def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                     image: str = '', model: str = 'gemini-2.5-flash-lite', 
+                     thinking_budget: int = 20000, temperature: float = 1.0, 
+                     max_output_tokens: Optional[int] = None, **kwargs) -> str:
+        """Generate text using Gemini API with thinking budget"""
+        
+        # Configure generation settings
+        generation_config = genai.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        
+        # Add thinking budget for thinking models
+        if 'thinking' in model:
+            generation_config.thinking_budget = thinking_budget
+        
+        # Configure safety settings (permissive for development)
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
+        try:
+            gen_model = genai.GenerativeModel(
+                model_name=model,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                system_instruction=system_prompt if system_prompt else None
+            )
+            
+            # Build conversation history
+            chat_history = []
+            for user_msg, assistant_msg in history:
+                chat_history.extend([
+                    {"role": "user", "parts": [user_msg]},
+                    {"role": "model", "parts": [assistant_msg]}
+                ])
+            
+            # Build content with optional image
+            contents = []
+            if image:
+                if image.startswith(('http://', 'https://')):
+                    # For URLs, use the image directly
+                    contents.append(image)
+                else:
+                    # For local files, expand path and read with PIL Image
+                    image_path = os.path.expanduser(image)
+                    from PIL import Image as PILImage
+                    img = PILImage.open(image_path)
+                    contents.append(img)
+            
+            contents.append(prompt)
+            
+            # Start chat if we have history, otherwise generate directly
+            if chat_history:
+                chat = gen_model.start_chat(history=chat_history)
+                response = chat.send_message(contents)
+            else:
+                response = gen_model.generate_content(contents)
+            
+            return response.text
+        except Exception as e:
+            self.logger.error(f"Google API error: {e}")
+            raise
+    
+    def generate_embedding(self, text: str, model: str = 'text-embedding-004', **kwargs) -> List[float]:
+        """Generate embedding using Google API"""
+        try:
+            result = genai.embed_content(model=f"models/{model}", content=text)
+            return result['embedding']
+        except Exception as e:
+            self.logger.error(f"Google embedding error: {e}")
+            raise
+    
+
+
+class OllamaProvider(BaseProvider):
+    """Ollama provider for local models"""
+    
+    def __init__(self, api_key: str = '', base_url: str = 'http://localhost:11434'):
+        super().__init__(api_key)
+        self.base_url = base_url
+    
+    def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                     image: str = '', model: str = 'gpt-oss:20b', temperature: float = 0.7, 
+                     max_tokens: Optional[int] = None, **kwargs) -> str:
+        """Generate text using Ollama API"""
+        messages = self._build_messages(prompt, system_prompt, history, image)
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+            }
+        }
+        
+        if max_tokens:
+            payload["options"]["num_predict"] = max_tokens
+        
+        try:
+            resp = requests.post(f"{self.base_url}/api/chat", json=payload)
+            resp.raise_for_status()
+            return resp.json()['message']['content']
+        except Exception as e:
+            self.logger.error(f"Ollama API error: {e}")
+            raise
+    
+    def generate_embedding(self, text: str, model: str = 'mxbai-embed-large', **kwargs) -> List[float]:
+        """Generate embedding using Ollama API"""
+        payload = {"model": model, "input": text}
+        
+        try:
+            resp = requests.post(f"{self.base_url}/api/embed", json=payload)
+            resp.raise_for_status()
+            return resp.json()['embeddings'][0]
+        except Exception as e:
+            self.logger.error(f"Ollama embedding error: {e}")
+            raise
+    
+    
+    def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str) -> List[Dict[str, Any]]:
+        """Build Ollama message format"""
+        messages = []
+        
+        # Add system prompt
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        # Add conversation history
+        for user_msg, assistant_msg in history:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": assistant_msg})
+        
+        # Build current user message
+        user_message = {"role": "user", "content": prompt}
+        
+        # Add image if provided
+        if image:
+            if image.startswith(('http://', 'https://')):
+                resp = requests.get(image)
+                resp.raise_for_status()
+                img_data = resp.content
+            else:
+                # Expand tilde and resolve path
+                image_path = os.path.expanduser(image)
+                with open(image_path, 'rb') as f:
+                    img_data = f.read()
+            
+            base64_image = base64.b64encode(img_data).decode('utf-8')
+            user_message["images"] = [base64_image]
+        
+        messages.append(user_message)
+        return messages
+
+
+# Provider factory and cache
+_provider_cache = {}
+
+def get_provider(provider: str, api_key: str = None, **kwargs) -> BaseProvider:
+    """Factory function to get provider instances with caching"""
+    cache_key = f"{provider}_{api_key or 'default'}"
+    
+    if cache_key not in _provider_cache:
+        if provider == 'openai':
+            _provider_cache[cache_key] = OpenAIProvider(api_key or config.OPENAI_API_KEY)
+        elif provider == 'google':
+            _provider_cache[cache_key] = GoogleProvider(api_key or config.GOOGLE_API_KEY)
+        elif provider == 'ollama':
+            base_url = kwargs.get('base_url', config.OLLAMA_URL)
+            _provider_cache[cache_key] = OllamaProvider(api_key or '', base_url)
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+    
+    return _provider_cache[cache_key]
+
 def _parse_model(model_provider: str) -> tuple[str, str]:
-    model = ''
-    provider = 'ollama'
+    """Parse model@provider format"""
+    model_provider = model_provider.lower()
     if '@' in model_provider:
-        model, provider = model_provider.lower().split('@')
-    else:
-        model = model_provider.lower()
-        if 'gpt-oss' in model or 'gemma' in model:
+        # Split only on the last @ to handle cases like model:version@provider
+        parts = model_provider.rsplit('@', 1)
+        if len(parts) == 2:
+            model, provider = parts
+        else:
+            # Fallback if rsplit doesn't work as expected
+            model = model_provider
             provider = 'ollama'
-        elif 'gpt' in model:
+    else:
+        model = model_provider
+        if 'gpt' in model or 'o1' in model or 'o3' in model:
             provider = 'openai'
         elif 'gemini' in model:
             provider = 'google'
+        else:
+            provider = 'ollama'
+    
     if provider not in ['ollama', 'openai', 'google']:
         raise ValueError(f"Unknown provider: {provider}")
     return model, provider
 
-def _get_prompt(action:str, model: str, provider: str) -> str:
+def _get_prompt(type: str, action: str, model: str, provider: str) -> str:
+    """Get prompt template with hierarchical fallback"""
     if os.path.exists(config.PROMPTS_DIR):
         for name in [
-            f'{action}_{provider}_{model}', 
-            f'{action}_{provider}', 
-            f'{action}_{model}', 
-            f'{action}', 
-            f'{model}'
+            f'{type}_{action}_{provider}_{model}',
+            f'{type}_{action}_{provider}',
+            f'{type}_{action}_{model}',
+            f'{type}_{action}',
+            f'{type}_{model}',
+            f'{action}_{provider}_{model}',
+            f'{action}_{provider}',
+            f'{action}_{model}',
+            f'{action}'
         ]:
-            prompt_path = os.path.join(config.PROMPTS_DIR, f'prompt_{name}.md')
+            prompt_path = os.path.join(config.PROMPTS_DIR, f'{name}.md')
             if os.path.exists(prompt_path):
                 with open(prompt_path, 'r', encoding='utf-8') as f:
                     return f.read()
     return ''
 
-def get_embedding(text: str, model_provider: str = config.EMB_MODEL) -> list[float]:
-    model, provider = _parse_model(model_provider)
-    return []
+def get_embedding(text: str, model_provider: str = config.EMB_MODEL) -> List[float]:
+    """Generate text embedding using specified model and provider"""
+    model, provider_name = _parse_model(model_provider)
+    prompt = _get_prompt('sys', 'emb', model, provider_name)
+    if prompt:
+        text = prompt + '\n\n' + text
+    
+    provider = get_provider(provider_name)
+    return provider.generate_embedding(text, model)
 
-def get_response(prompt: str, image: str, model_provider: str = config.RSP_MODEL) -> str:
-    model, provider = _parse_model(model_provider)
-    return ''
+def get_response(prompt: str, image: str = '', history: List[Tuple[str, str]] = [], 
+                model_provider: str = config.RSP_MODEL, **kwargs) -> str:
+    """Generate text response using specified model and provider"""
+    model, provider_name = _parse_model(model_provider)
+    sys_prompt = _get_prompt('sys', 'rsp', model, provider_name)
+    
+    provider = get_provider(provider_name)
+    return provider.generate_text(prompt, sys_prompt, history, image, model=model, **kwargs)
+
 
 def get_summarization(text: str, model_provider: str = config.SUM_MODEL) -> str:
+    """Generate text summarization"""
     model, provider = _parse_model(model_provider)
-    prompt = _get_prompt('sum', model, provider)
-    return get_response(prompt, '', model_provider)
+    prompt = _get_prompt('usr', 'sum', model, provider)
+    return get_response(prompt + text, model_provider=model_provider)
 
 def get_image_description(image: str, model_provider: str = config.RSP_MODEL) -> str:
+    """Generate image description using vision capabilities"""
     model, provider = _parse_model(model_provider)
-    prompt = _get_prompt('vsn', model, provider)
-    return get_response(prompt, image, model_provider)
-
-
+    prompt = _get_prompt('usr', 'vsn', model, provider)
+    return get_response(prompt, image=image, model_provider=model_provider)
 
 if __name__ == '__main__':
     test_text_models = [
         'gpt-5-nano@openai',
         'gemini-2.5-flash@google',
-        'gemma3:27b@ollama',
         'gpt-oss:20b@ollama'
     ]
     test_image_models = [
-        'llava:7b@ollama',
-        'gemma3:27b@ollama',
-        'gemini-2.5-flash@google'
+        'gpt-5-mini@openai',
+        'gemini-2.5-flash@google',
+        'llava:7b@ollama'
     ]
     test_embedding_models = [
         'text-embedding-3-large@openai',
-        'mxbai-embed-large@ollama',
-        'gemini-embedding-001@google'
+        'gemini-embedding-001@google',
+        'mxbai-embed-large@ollama'
     ]
     test_text = """
     As it flew an idea formed itself in the Procurator's mind, which was
@@ -91,19 +507,32 @@ to dictate this to the secretary.
         'https://docs-ai.alarislabs.com/HTML-SMS/hmfile_hash_d43cc7e4.png',
         '~/Downloads/clip0419.png'
     ]
+    # Test text generation
     for model in test_text_models:
-        logger.debug(f"Testing model: {model}")
-        response = get_response(test_text, model=model)
-        logger.debug(f"Response: {response}")
+        try:
+            logger.info(f"Testing text model: {model}")
+            response = get_response(test_text, model_provider=model)
+            logger.info(f"Response: {response[:100]}...")
+        except Exception as e:
+            logger.error(f"Error testing {model}: {e}")
+    
+    # Test embeddings
+    for model in test_embedding_models:
+        try:
+            logger.info(f"Testing embedding model: {model}")
+            response = get_embedding(test_text, model_provider=model)
+            logger.info(f"Embedding dimensions: {len(response)}")
+        except Exception as e:
+            logger.error(f"Error testing {model}: {e}")
+    
+    # Test image description
     for model in test_image_models:
         for image in test_images:
-            logger.debug(f"Testing model {model} with image: {image}")
-            response = get_response(test_text, image=image, model=model)
-            logger.debug(f"Response: {response}")
-    for model in test_embedding_models:
-        logger.debug(f"Testing model: {model}")
-        response = get_embedding(test_text, model=model)
-        logger.debug(f"Response: {response[0:10]}")
+            try:
+                logger.info(f"Testing image model {model} with image: {image}")
+                response = get_image_description(image, model_provider=model)
+                logger.info(f"Image description: {response}")
+            except Exception as e:
+                logger.error(f"Error testing {model} with image {image}: {e}")
 
-    logger.debug("Hello")
-    config.print_config()
+    logger.info("Testing completed")

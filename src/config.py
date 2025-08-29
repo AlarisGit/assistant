@@ -104,10 +104,12 @@ else:
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", 11434))
+OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
+#SUM_MODEL = os.getenv("SUM_MODEL", "gemini-2.5-flash@google")
 SUM_MODEL = os.getenv("SUM_MODEL", "gpt-oss-20b@ollama")
 EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-large@openai")
 #VSN_MODEL = os.getenv("VSN_MODEL", "llava:7b@ollama")
