@@ -1,6 +1,7 @@
 data/
 cache/
 log/
+test/
 .vscode/
 .env
 __pycache__

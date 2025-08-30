@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from abc import ABC, abstractmethod
 from openai import OpenAI
 import google.generativeai as genai
-from PIL import Image
+import sys
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -460,7 +460,6 @@ def get_response(prompt: str, image: str = '', history: List[Tuple[str, str]] = 
     provider = get_provider(provider_name)
     return provider.generate_text(prompt, sys_prompt, history, image, model=model, **kwargs)
 
-
 def get_summarization(text: str, model_provider: str = config.SUM_MODEL) -> str:
     """Generate text summarization"""
     model, provider = _parse_model(model_provider)
@@ -477,12 +476,15 @@ if __name__ == '__main__':
     test_text_models = [
         'gpt-5-nano@openai',
         'gemini-2.5-flash@google',
-        'gpt-oss:20b@ollama'
+        'gpt-oss:20b@ollama',
+        'gemma3:27b@ollama'
     ]
     test_image_models = [
         'gpt-5-mini@openai',
+        'gpt-5-nano@openai',
         'gemini-2.5-flash@google',
-        'llava:7b@ollama'
+        'llava:7b@ollama',
+        'gemma3:27b@ollama'
     ]
     test_embedding_models = [
         'text-embedding-3-large@openai',
@@ -505,14 +507,28 @@ to dictate this to the secretary.
     """
     test_images = [
         'https://docs-ai.alarislabs.com/HTML-SMS/hmfile_hash_d43cc7e4.png',
-        '~/Downloads/clip0419.png'
+        'test/clip0419.png',
+        'test/clip0783.png'
     ]
+    
+    # Test image description
+    for model in test_image_models:
+        for image in test_images:
+            try:
+                logger.info(f"Testing image model {model} with image: {image}")
+                response = get_image_description(image, model_provider=model)
+                logger.info(f"Image description: {response}")
+            except Exception as e:
+                logger.error(f"Error testing {model} with image {image}: {e}")
+
+    sys.exit(0)
+
     # Test text generation
     for model in test_text_models:
         try:
             logger.info(f"Testing text model: {model}")
             response = get_response(test_text, model_provider=model)
-            logger.info(f"Response: {response[:100]}...")
+            logger.info(f"Response: {response}")
         except Exception as e:
             logger.error(f"Error testing {model}: {e}")
     
@@ -525,14 +541,4 @@ to dictate this to the secretary.
         except Exception as e:
             logger.error(f"Error testing {model}: {e}")
     
-    # Test image description
-    for model in test_image_models:
-        for image in test_images:
-            try:
-                logger.info(f"Testing image model {model} with image: {image}")
-                response = get_image_description(image, model_provider=model)
-                logger.info(f"Image description: {response}")
-            except Exception as e:
-                logger.error(f"Error testing {model} with image {image}: {e}")
-
     logger.info("Testing completed")
