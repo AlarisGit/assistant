@@ -9,9 +9,47 @@ from abc import ABC, abstractmethod
 from openai import OpenAI
 import google.generativeai as genai
 import sys
+import io
+import time
+from PIL import Image as PILImage
+import json
+import hashlib
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+def get_cache_path(key: dict) -> Tuple[str, str]:
+    if key and isinstance(key, dict):
+        key_str = json.dumps(key, sort_keys=True, ensure_ascii=False, indent=4)
+        key_hash = hashlib.md5(key_str.encode('utf-8')).hexdigest()
+        cache_subdir = os.path.join(config.CACHE_DIR, 'llm', key_hash[0:2], key_hash[2:4])
+
+        return cache_subdir, key_hash
+    else:
+        return None, None
+   
+def load_cache(key: dict) -> Optional[str]:
+    value_dict = None
+    if key and isinstance(key, dict):
+        cache_subdir, key_hash = get_cache_path(key)
+        if os.path.isdir(cache_subdir):
+            cache_file = os.path.join(cache_subdir, key_hash + '.json')
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r') as f:
+                    value_str = f.read()
+                    value_dict = json.loads(value_str)
+    return value_dict
+
+
+def save_cache(key: dict, value: dict):
+    if key and isinstance(key, dict) and value and isinstance(value, dict):
+        cache_subdir, key_hash = get_cache_path(key)
+        if not os.path.exists(cache_subdir):
+            os.makedirs(cache_subdir)
+        cache_file = os.path.join(cache_subdir, key_hash + '.json')
+        with open(cache_file, 'w') as f:
+            f.write(json.dumps({**key, **value}, sort_keys=True, ensure_ascii=False, indent=4))
 
 class BaseProvider(ABC):
     """Base class for LLM providers with unified interface"""
@@ -301,12 +339,34 @@ class OllamaProvider(BaseProvider):
     def __init__(self, api_key: str = '', base_url: str = 'http://localhost:11434'):
         super().__init__(api_key)
         self.base_url = base_url
+
+    """
+    1. create Modelfile:
+    FROM gemma3:27b
+    PARAMETER num_ctx 32768
+    2. build model:
+    ollama create gemma3:27b-32k -f Modelfile
+    """
     
     def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
                      image: str = '', model: str = 'gpt-oss:20b', temperature: float = 0.7, 
-                     max_tokens: Optional[int] = None, **kwargs) -> str:
+                     max_tokens: Optional[int] = None, num_ctx: Optional[int] = None, 
+                     request_timeout: Optional[Tuple[float, float]] = None,
+                     max_image_dim: Optional[int] = None, jpeg_quality: int = 90,
+                     **kwargs) -> str:
         """Generate text using Ollama API"""
-        messages = self._build_messages(prompt, system_prompt, history, image)
+        # Auto-tune image limits for known models if not provided
+        if image and max_image_dim is None:
+            mdl = (model or '').lower()
+            if 'gemma3' in mdl:
+                max_image_dim = 896
+            elif 'llava' in mdl:
+                max_image_dim = 336
+            else:
+                max_image_dim = 2048
+        
+        messages = self._build_messages(prompt, system_prompt, history, image,
+                                        max_image_dim=max_image_dim, jpeg_quality=jpeg_quality)
         
         payload = {
             "model": model,
@@ -314,19 +374,47 @@ class OllamaProvider(BaseProvider):
             "stream": False,
             "options": {
                 "temperature": temperature,
+                # Ensure large context window when supported by the model
+                "num_ctx": num_ctx or int(os.getenv("OLLAMA_NUM_CTX", 32768)),
             }
         }
         
         if max_tokens:
             payload["options"]["num_predict"] = max_tokens
         
-        try:
-            resp = requests.post(f"{self.base_url}/api/chat", json=payload)
-            resp.raise_for_status()
-            return resp.json()['message']['content']
-        except Exception as e:
-            self.logger.error(f"Ollama API error: {e}")
-            raise
+        # Timeouts: (connect, read). Defaults tuned for large-generation reads
+        timeout = request_timeout or (10.0, 300.0)
+        url = f"{self.base_url}/api/chat"
+        
+        # Simple retry for transient 5xx
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = requests.post(url, json=payload, timeout=timeout)
+                if resp.status_code >= 500:
+                    # Capture body for diagnostics, but avoid logging large payloads
+                    body_preview = resp.text[:1000]
+                    self.logger.warning(
+                        f"Ollama server {resp.status_code} on attempt {attempt+1}/3. Body preview: {body_preview}"
+                    )
+                    # Backoff then retry for transient errors
+                    if resp.status_code in (502, 503, 504) and attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                data = resp.json()
+                return data['message']['content']
+            except Exception as e:
+                last_exc = e
+                # On network/timeout/transient errors, retry
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+        
+        # Final failure: log details and raise
+        self.logger.error(f"Ollama API error after retries: {last_exc}")
+        raise last_exc
     
     def generate_embedding(self, text: str, model: str = 'mxbai-embed-large', **kwargs) -> List[float]:
         """Generate embedding using Ollama API"""
@@ -341,7 +429,8 @@ class OllamaProvider(BaseProvider):
             raise
     
     
-    def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str) -> List[Dict[str, Any]]:
+    def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str,
+                        max_image_dim: Optional[int] = None, jpeg_quality: int = 95) -> List[Dict[str, Any]]:
         """Build Ollama message format"""
         messages = []
         
@@ -359,18 +448,38 @@ class OllamaProvider(BaseProvider):
         
         # Add image if provided
         if image:
-            if image.startswith(('http://', 'https://')):
-                resp = requests.get(image)
-                resp.raise_for_status()
-                img_data = resp.content
-            else:
-                # Expand tilde and resolve path
-                image_path = os.path.expanduser(image)
-                with open(image_path, 'rb') as f:
-                    img_data = f.read()
-            
-            base64_image = base64.b64encode(img_data).decode('utf-8')
-            user_message["images"] = [base64_image]
+            try:
+                # Load image (URL or local)
+                if image.startswith(('http://', 'https://')):
+                    resp = requests.get(image, timeout=(5.0, 20.0))
+                    resp.raise_for_status()
+                    img_bytes = resp.content
+                else:
+                    image_path = os.path.expanduser(image)
+                    with open(image_path, 'rb') as f:
+                        img_bytes = f.read()
+
+                # Process with PIL: resize and re-encode to JPEG
+                try:
+                    with PILImage.open(io.BytesIO(img_bytes)) as im:
+                        # Convert to RGB (drop alpha)
+                        if im.mode != 'RGB':
+                            im = im.convert('RGB')
+                        if max_image_dim and (im.width > max_image_dim or im.height > max_image_dim):
+                            im.thumbnail((max_image_dim, max_image_dim), resample=PILImage.LANCZOS)
+                        buf = io.BytesIO()
+                        im.save(buf, format='JPEG', quality=jpeg_quality, optimize=True)
+                        processed = buf.getvalue()
+                except Exception:
+                    # Fallback to original bytes if PIL fails
+                    processed = img_bytes
+
+                base64_image = base64.b64encode(processed).decode('utf-8')
+                user_message["images"] = [base64_image]
+            except Exception as e:
+                # If image processing fails, still send text-only to avoid request failure
+                logging.getLogger(f"{__name__}.{self.__class__.__name__}").warning(
+                    f"Image preprocessing failed ({e}); sending text-only message.")
         
         messages.append(user_message)
         return messages
@@ -444,47 +553,46 @@ def _get_prompt(type: str, action: str, model: str, provider: str) -> str:
 def get_embedding(text: str, model_provider: str = config.EMB_MODEL) -> List[float]:
     """Generate text embedding using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
-    prompt = _get_prompt('sys', 'emb', model, provider_name)
-    if prompt:
-        text = prompt + '\n\n' + text
-    
-    provider = get_provider(provider_name)
-    return provider.generate_embedding(text, model)
+    prompt = _get_prompt('usr', 'emb', model, provider_name)
+    sys_prompt = _get_prompt('sys', 'emb', model, provider_name)
 
-def get_response(prompt: str, image: str = '', history: List[Tuple[str, str]] = [], 
+    emb_text = f"{sys_prompt + '\n\n' if sys_prompt else ''}{prompt + '\n\n' if prompt else ''}{text}"
+
+    provider = get_provider(provider_name)
+    return provider.generate_embedding(emb_text, model)
+
+def generate_text(action: str, text: str = '', history: List[Tuple[str, str]] = [], image: str = '',
                 model_provider: str = config.RSP_MODEL, **kwargs) -> str:
     """Generate text response using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
-    sys_prompt = _get_prompt('sys', 'rsp', model, provider_name)
     
+    usr_prompt = _get_prompt('usr', action, model, provider_name)
+    sys_prompt = _get_prompt('sys', action, model, provider_name)
+
+    prompt = f"{usr_prompt + '\n\n' if usr_prompt else ''}{text}"    
+
     provider = get_provider(provider_name)
     return provider.generate_text(prompt, sys_prompt, history, image, model=model, **kwargs)
 
 def get_summarization(text: str, model_provider: str = config.SUM_MODEL) -> str:
     """Generate text summarization"""
-    model, provider = _parse_model(model_provider)
-    prompt = _get_prompt('usr', 'sum', model, provider)
-    return get_response(prompt + text, model_provider=model_provider)
+    return generate_text('sum', text, model_provider=model_provider)
 
 def get_image_description(image: str, model_provider: str = config.RSP_MODEL) -> str:
     """Generate image description using vision capabilities"""
-    model, provider = _parse_model(model_provider)
-    prompt = _get_prompt('usr', 'vsn', model, provider)
-    return get_response(prompt, image=image, model_provider=model_provider)
+    return generate_text('vsn', text='', image=image, model_provider=model_provider)
 
 if __name__ == '__main__':
     test_text_models = [
         'gpt-5-nano@openai',
         'gemini-2.5-flash@google',
         'gpt-oss:20b@ollama',
-        'gemma3:27b@ollama'
+        'gemma3:27b-32k@ollama'
     ]
-    test_image_models = [
-        'gpt-5-mini@openai',
+    test_vision_models = [
         'gpt-5-nano@openai',
         'gemini-2.5-flash@google',
-        'llava:7b@ollama',
-        'gemma3:27b@ollama'
+        'gemma3:27b-32k@ollama'
     ]
     test_embedding_models = [
         'text-embedding-3-large@openai',
@@ -512,22 +620,23 @@ to dictate this to the secretary.
     ]
     
     # Test image description
-    for model in test_image_models:
-        for image in test_images:
+    #test_vision_models = ['gemma3:27b-32k@ollama']
+    #test_vision_models = ['llava:34b@ollama']
+    for image in test_images:
+        for model in test_vision_models:
             try:
-                logger.info(f"Testing image model {model} with image: {image}")
+                logger.info(f"Testing image {image} description with model {model}")
                 response = get_image_description(image, model_provider=model)
                 logger.info(f"Image description: {response}")
             except Exception as e:
                 logger.error(f"Error testing {model} with image {image}: {e}")
-
     sys.exit(0)
 
     # Test text generation
     for model in test_text_models:
         try:
             logger.info(f"Testing text model: {model}")
-            response = get_response(test_text, model_provider=model)
+            response = get_summarization(test_text, model_provider=model)
             logger.info(f"Response: {response}")
         except Exception as e:
             logger.error(f"Error testing {model}: {e}")
