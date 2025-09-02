@@ -20,7 +20,7 @@ logger.setLevel(logging.DEBUG)
 
 
 def get_cache_path(key: dict) -> Tuple[str, str]:
-    if key and isinstance(key, dict):
+    if key and isinstance(key, dict) and os.path.isdir(config.CACHE_DIR):
         key_str = json.dumps(key, sort_keys=True, ensure_ascii=False, indent=4)
         key_hash = hashlib.md5(key_str.encode('utf-8')).hexdigest()
         cache_subdir = os.path.join(config.CACHE_DIR, 'llm', key_hash[0:2], key_hash[2:4])
@@ -29,27 +29,34 @@ def get_cache_path(key: dict) -> Tuple[str, str]:
     else:
         return None, None
    
-def load_cache(key: dict) -> Optional[str]:
+def load_cached_value(key: dict) -> Optional[dict]:
     value_dict = None
     if key and isinstance(key, dict):
         cache_subdir, key_hash = get_cache_path(key)
-        if os.path.isdir(cache_subdir):
+        logger.debug(f"Looking for cached value for key {key_hash}")
+        if cache_subdir and os.path.isdir(cache_subdir):
             cache_file = os.path.join(cache_subdir, key_hash + '.json')
             if os.path.exists(cache_file):
                 with open(cache_file, 'r') as f:
                     value_str = f.read()
-                    value_dict = json.loads(value_str)
+                    try:
+                        value_dict = json.loads(value_str)
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to load cached value for key {key_hash}")
+                        value_dict = None
     return value_dict
 
 
-def save_cache(key: dict, value: dict):
+def save_cached_value(key: dict, value: dict):
     if key and isinstance(key, dict) and value and isinstance(value, dict):
         cache_subdir, key_hash = get_cache_path(key)
-        if not os.path.exists(cache_subdir):
-            os.makedirs(cache_subdir)
-        cache_file = os.path.join(cache_subdir, key_hash + '.json')
-        with open(cache_file, 'w') as f:
-            f.write(json.dumps({**key, **value}, sort_keys=True, ensure_ascii=False, indent=4))
+        if cache_subdir:
+            if not os.path.exists(cache_subdir):
+                os.makedirs(cache_subdir)
+            cache_file = os.path.join(cache_subdir, key_hash + '.json')
+            logger.debug(f"Saving cached value for key {key_hash}")
+            with open(cache_file, 'w') as f:
+                f.write(json.dumps({**key, **value}, sort_keys=True, ensure_ascii=False, indent=4))
 
 class BaseProvider(ABC):
     """Base class for LLM providers with unified interface"""
