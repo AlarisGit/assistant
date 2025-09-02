@@ -1,13 +1,39 @@
-Analyze this image for technical documentation purposes. First, assess the image's complexity (e.g., simple like a single button or icon, or complex like a full UI screen, diagram, or chart). Tailor the level of detail accordingly: keep it concise and focused for simple images, expanding comprehensively for complex ones.
+Analyze this image from an SMS platform user manual and return a JSON object with structured information for RAG-based search and context replacement.
 
-Provide a structured description covering the following sections where applicable—omit any that are irrelevant:
+**Analysis Guidelines**:
+1. **Extract all visible text** - buttons, labels, headers, field names, values, messages
+2. **Identify the SMS platform feature** - what functionality does this relate to?
+3. **Describe key UI elements** - only mention layout/positioning for complex interfaces
+4. **Focus on searchable content** - use terminology users would search for
+5. **Stay factual** - only describe what is explicitly visible, do not infer or assume functionality
 
-1. **Image Type Classification**: Identify if this is a screenshot, diagram, UI interface, code snippet, chart, or other type.
-2. **Main Content Description**: Describe the primary content, layout, and visual elements. Be brief for simple images.
-3. **UI Elements (if applicable)**: List visible buttons, fields, menus, tabs, icons, and interactive elements with their labels and approximate positions.
-4. **Text Content**: Extract and transcribe ALL visible text, including window titles, headers, button labels, field values, error messages, or any other readable text.
-5. **Technical Details (if applicable)**: Note software interface elements, configuration settings, system information, code, commands, or diagrams.
-6. **Functional Purpose (if applicable)**: Explain the likely use of this interface, screen, or diagram in the overall system.
-7. **User Interaction (if applicable)**: Describe potential user actions or interactions.
+**Required JSON Output Format**:
+```json
+{
+  "complexity": "simple|medium|complex",
+  "feature_name": "Main SMS platform feature or UI component name",
+  "description": "Factual description of what is visible (length based on complexity)",
+  "visible_text": ["array", "of", "all", "visible", "text", "elements"],
+  "ui_elements": ["list", "of", "interactive", "elements", "if", "applicable"],
+  "text_for_search": "Optimized text combining feature name and key terms for RAG search",
+  "assumptions": "Any inferred functionality or context (clearly marked as non-factual)"
+}
+```
 
-Focus on accuracy, completeness, and professionalism. For simple images, prioritize brevity; for complex ones, ensure thoroughness suitable for user guides or documentation.
+**Complexity Levels**:
+- **Simple**: Single button, icon, small dialog → brief description
+- **Medium**: Form with multiple fields, interface section → moderate detail  
+- **Complex**: Full screen, multi-panel dashboard, detailed diagram → comprehensive description
+
+**Example Output**:
+```json
+{
+  "complexity": "simple",
+  "feature_name": "Stop Button",
+  "description": "Red button with white text labeled 'Stop'",
+  "visible_text": ["Stop"],
+  "ui_elements": ["button"],
+  "text_for_search": "Stop button SMS campaign control",
+  "assumptions": "Likely used to halt or cancel an ongoing process"
+}
+```
