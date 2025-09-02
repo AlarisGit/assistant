@@ -492,6 +492,105 @@ class OllamaProvider(BaseProvider):
         return messages
 
 
+# Caching wrapper
+class CachedProvider(BaseProvider):
+    """Provider proxy that adds caching for text and embedding calls"""
+    def __init__(self, inner: BaseProvider, provider_name: str):
+        super().__init__(getattr(inner, 'api_key', ''))
+        self.inner = inner
+        self.provider_name = provider_name
+        self.logger = logging.getLogger(f"{__name__}.CachedProvider[{provider_name}]")
+
+    def _sanitize_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        # Remove transport-only and non-deterministic args
+        filtered = dict(kwargs)
+        filtered.pop('request_timeout', None)
+        filtered.pop('use_cache', None)
+        filtered.pop('force_refresh', None)
+        return filtered
+
+    def _image_fingerprint(self, image: str) -> Optional[str]:
+        try:
+            if not image:
+                return None
+            if image.startswith(('http://', 'https://')):
+                # Avoid network fetch for key; use URL string
+                return f"url:{image}"
+            # Local file: hash contents
+            image_path = os.path.expanduser(image)
+            with open(image_path, 'rb') as f:
+                data = f.read()
+            return 'sha256:' + hashlib.sha256(data).hexdigest()
+        except Exception:
+            return None
+
+    def generate_text(
+        self,
+        prompt: str,
+        system_prompt: str = '',
+        history: List[Tuple[str, str]] = [],
+        image: str = '',
+        **kwargs,
+    ) -> str:
+        use_cache: bool = kwargs.pop('use_cache', True)
+        force_refresh: bool = kwargs.pop('force_refresh', False)
+        model = kwargs.get('model', '')
+        sanitized_kwargs = self._sanitize_kwargs(kwargs)
+
+        key = {
+            'cache_schema': 1,
+            'op': 'generate_text',
+            'provider': self.provider_name,
+            'model': model,
+            'system_prompt': system_prompt,
+            'prompt': prompt,
+            'history': history,
+            'image': image,
+            'image_fp': self._image_fingerprint(image),
+            'kwargs': sanitized_kwargs,
+        }
+
+        if use_cache and not force_refresh:
+            cached = load_cached_value(key)
+            if cached and isinstance(cached, dict) and 'response' in cached:
+                return cached['response']
+
+        # Miss: delegate to inner
+        response = self.inner.generate_text(prompt, system_prompt, history, image, **kwargs)
+
+        try:
+            save_cached_value(key, {'response': response, 'ts': time.time()})
+        except Exception as e:
+            self.logger.warning(f"Failed to save cache (text): {e}")
+        return response
+
+    def generate_embedding(self, text: str, model: str, **kwargs) -> List[float]:
+        use_cache: bool = kwargs.pop('use_cache', True)
+        force_refresh: bool = kwargs.pop('force_refresh', False)
+        sanitized_kwargs = self._sanitize_kwargs(kwargs)
+
+        key = {
+            'cache_schema': 1,
+            'op': 'generate_embedding',
+            'provider': self.provider_name,
+            'model': model,
+            'text': text,
+            'kwargs': sanitized_kwargs,
+        }
+
+        if use_cache and not force_refresh:
+            cached = load_cached_value(key)
+            if cached and isinstance(cached, dict) and 'embedding' in cached:
+                return cached['embedding']
+
+        emb = self.inner.generate_embedding(text, model, **kwargs)
+        try:
+            save_cached_value(key, {'embedding': emb, 'ts': time.time()})
+        except Exception as e:
+            self.logger.warning(f"Failed to save cache (embedding): {e}")
+        return emb
+
+
 # Provider factory and cache
 _provider_cache = {}
 
@@ -501,14 +600,16 @@ def get_provider(provider: str, api_key: str = None, **kwargs) -> BaseProvider:
     
     if cache_key not in _provider_cache:
         if provider == 'openai':
-            _provider_cache[cache_key] = OpenAIProvider(api_key or config.OPENAI_API_KEY)
+            inner = OpenAIProvider(api_key or config.OPENAI_API_KEY)
         elif provider == 'google':
-            _provider_cache[cache_key] = GoogleProvider(api_key or config.GOOGLE_API_KEY)
+            inner = GoogleProvider(api_key or config.GOOGLE_API_KEY)
         elif provider == 'ollama':
             base_url = kwargs.get('base_url', config.OLLAMA_URL)
-            _provider_cache[cache_key] = OllamaProvider(api_key or '', base_url)
+            inner = OllamaProvider(api_key or '', base_url)
         else:
             raise ValueError(f"Unknown provider: {provider}")
+        # Wrap with caching proxy
+        _provider_cache[cache_key] = CachedProvider(inner, provider)
     
     return _provider_cache[cache_key]
 
@@ -637,7 +738,6 @@ to dictate this to the secretary.
                 logger.info(f"Image description: {response}")
             except Exception as e:
                 logger.error(f"Error testing {model} with image {image}: {e}")
-    sys.exit(0)
 
     # Test text generation
     for model in test_text_models:
