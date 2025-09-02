@@ -14,6 +14,7 @@ import time
 from PIL import Image as PILImage
 import json
 import hashlib
+import string
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -638,8 +639,29 @@ def _parse_model(model_provider: str) -> tuple[str, str]:
         raise ValueError(f"Unknown provider: {provider}")
     return model, provider
 
-def _get_prompt(type: str, action: str, model: str, provider: str) -> str:
-    """Get prompt template with hierarchical fallback"""
+class _SafeDict(dict):
+    def __missing__(self, key):
+        # Leave unknown placeholders intact
+        return '{' + key + '}'
+
+def _extract_placeholders(s: str) -> set:
+    names = set()
+    for literal_text, field_name, format_spec, conversion in string.Formatter().parse(s or ''):
+        if field_name:
+            # Handle nested or attribute style if ever used
+            names.add(field_name.split('.')[0].split('[')[0])
+    return names
+
+def _format_prompt(template: str, prompt_options: Optional[Dict[str, Any]]) -> str:
+    try:
+        return (template or '').format_map(_SafeDict(prompt_options or {}))
+    except Exception:
+        # Fallback to raw if formatting fails
+        return template or ''
+
+def _get_prompt(type: str, action: str, model: str, provider: str, 
+                prompt_options: Optional[Dict[str, Any]] = None) -> str:
+    """Get prompt template with hierarchical fallback and optional formatting"""
     if os.path.exists(config.PROMPTS_DIR):
         for name in [
             f'{type}_{action}_{provider}_{model}',
@@ -655,14 +677,15 @@ def _get_prompt(type: str, action: str, model: str, provider: str) -> str:
             prompt_path = os.path.join(config.PROMPTS_DIR, f'{name}.md')
             if os.path.exists(prompt_path):
                 with open(prompt_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                    raw = f.read()
+                    return _format_prompt(raw, prompt_options)
     return ''
 
-def get_embedding(text: str, model_provider: str = config.EMB_MODEL) -> List[float]:
+def get_embedding(text: str, model_provider: str = config.EMB_MODEL, prompt_options: Dict[str, Any] = {}) -> List[float]:
     """Generate text embedding using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
-    prompt = _get_prompt('usr', 'emb', model, provider_name)
-    sys_prompt = _get_prompt('sys', 'emb', model, provider_name)
+    prompt = _get_prompt('usr', 'emb', model, provider_name, prompt_options)
+    sys_prompt = _get_prompt('sys', 'emb', model, provider_name, prompt_options)
 
     emb_text = f"{sys_prompt + '\n\n' if sys_prompt else ''}{prompt + '\n\n' if prompt else ''}{text}"
 
@@ -670,25 +693,25 @@ def get_embedding(text: str, model_provider: str = config.EMB_MODEL) -> List[flo
     return provider.generate_embedding(emb_text, model)
 
 def generate_text(action: str, text: str = '', history: List[Tuple[str, str]] = [], image: str = '',
-                model_provider: str = config.RSP_MODEL, **kwargs) -> str:
+                model_provider: str = config.RSP_MODEL, prompt_options: Optional[Dict[str, Any]] = None, **kwargs) -> str:
     """Generate text response using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
     
-    usr_prompt = _get_prompt('usr', action, model, provider_name)
-    sys_prompt = _get_prompt('sys', action, model, provider_name)
+    usr_prompt = _get_prompt('usr', action, model, provider_name, prompt_options)
+    sys_prompt = _get_prompt('sys', action, model, provider_name, prompt_options)
 
     prompt = f"{usr_prompt + '\n\n' if usr_prompt else ''}{text}"    
 
     provider = get_provider(provider_name)
     return provider.generate_text(prompt, sys_prompt, history, image, model=model, **kwargs)
 
-def get_summarization(text: str, model_provider: str = config.SUM_MODEL) -> str:
+def get_summarization(text: str, model_provider: str = config.SUM_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
     """Generate text summarization"""
-    return generate_text('sum', text, model_provider=model_provider)
+    return generate_text('sum', text, model_provider=model_provider, prompt_options=prompt_options)
 
-def get_image_description(image: str, model_provider: str = config.RSP_MODEL) -> str:
+def get_image_description(image: str, model_provider: str = config.RSP_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
     """Generate image description using vision capabilities"""
-    return generate_text('vsn', text='', image=image, model_provider=model_provider)
+    return generate_text('vsn', text='', image=image, model_provider=model_provider, prompt_options=prompt_options)
 
 if __name__ == '__main__':
     test_text_models = [
