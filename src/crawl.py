@@ -287,7 +287,7 @@ ulrs_file = os.path.join(html_root_dir, "urls.json")
 DEFAULT_CRAWL_DELAY = 0.5  # seconds between requests
 DEFAULT_MAX_PAGES = 10000   # safety cap
 REQUEST_TIMEOUT = 15       # seconds
-USER_AGENT = "ProductManualCrawler/1.0 (+https://example.com)"
+USER_AGENT = "AlarisCrawler/1.0"
 
 
 def _init_robot_parser(base_url: str) -> robotparser.RobotFileParser:
