@@ -26,7 +26,7 @@ def _remove_bom_all(s: str | None) -> str | None:
     return s
 
 
-def _html_to_markdown_with_headings(html: str, page_title: str | None = None, base_url: str | None = None) -> str:
+def _html_to_markdown_with_headings(html: str, page_title: str | None = None, base_url: str | None = None, description: str | None = None) -> str:
     """Convert HTML body to Markdown, promoting likely section title elements to headings.
     Note: We intentionally do NOT prepend the page title; it is stored in metadata.
     - Elements with role="heading" (aria-level honored) become h1..h6
@@ -177,7 +177,7 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None, ba
         # 2) Split multiple inline bullets onto separate lines for readability
         for marker in (" - [", " * [", " + ["):
             md = md.replace(marker, "\n- [")
-        # Prepend Source and combined Crumbs (parents + section) at the very top of the Markdown
+        # Prepend Source, combined Crumbs, and Description at the very top of the Markdown
         header_lines = []
         if base_url:
             header_lines.append(f"Source: {base_url}")
@@ -203,6 +203,9 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None, ba
             combined_crumbs = (crumbs_text or "").strip()
         if combined_crumbs:
             header_lines.append(f"Crumbs: {combined_crumbs}")
+        # Add description if provided
+        if description and description.strip():
+            header_lines.append(f"Description: {description.strip()}")
         if header_lines:
             md = "\n".join(header_lines) + "\n\n" + md
             # Remove duplicate breadcrumb lines from the beginning of the body
@@ -722,7 +725,7 @@ def crawl_site(base_url: str, start_path: str = "/", max_pages: int = DEFAULT_MA
             meta["title"] = t
             meta["description"] = d
             # Convert HTML to Markdown (promote section titles to headings), make links absolute, and save
-            md_text = _html_to_markdown_with_headings(html, page_title=t, base_url=url)
+            md_text = _html_to_markdown_with_headings(html, page_title=t, base_url=url, description=d)
             md_path = _save_markdown(site_md_dir, url, md_text)
             meta["saved_md_path"] = os.path.relpath(md_path, md_root_dir)
             links = _extract_links(url, html)
