@@ -5,6 +5,7 @@ import os
 import json
 import hashlib
 import re
+from llm import get_image_description
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -65,9 +66,79 @@ def process_markdown_content(content: str) -> Dict[str, Any]:
     
     # Remove extra whitespace and empty lines at the beginning
     cleaned_content = re.sub(r'^\s*\n+', '', cleaned_content.strip())
-    result_dict['content'] = cleaned_content
+    
+    # Augment images with LLM-generated descriptions
+    augmented_content = _augment_images_with_descriptions(cleaned_content)
+    result_dict['content'] = augmented_content
+    result_dict['original_content'] = cleaned_content
     
     return result_dict
+
+def _augment_images_with_descriptions(content: str) -> str:
+    """
+    Find all image links in markdown content and augment them with LLM-generated descriptions.
+    
+    Args:
+        content: Cleaned markdown content
+        
+    Returns:
+        Markdown content with image descriptions added
+    """
+    # Pattern to match markdown image syntax: ![alt text](image_url)
+    image_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+    
+    def replace_image_with_description(match):
+        alt_text = match.group(1)
+        image_url = match.group(2)
+        original_image = match.group(0)
+        
+        try:
+            logger.info(f"Generating description for image: {image_url}")
+            # Call LLM to get image description
+            description_result = get_image_description(image_url)
+            
+            # Extract description from the result
+            if isinstance(description_result, dict) and 'description' in description_result:
+                image_description = description_result['description']
+            elif isinstance(description_result, str):
+                # Try to parse as JSON first
+                try:
+                    import json as json_module
+                    # Remove markdown code block formatting if present
+                    clean_result = description_result.strip()
+                    if clean_result.startswith('```json'):
+                        clean_result = clean_result[7:]  # Remove ```json
+                    if clean_result.endswith('```'):
+                        clean_result = clean_result[:-3]  # Remove ```
+                    clean_result = clean_result.strip()
+                    
+                    parsed_json = json_module.loads(clean_result)
+                    if isinstance(parsed_json, dict) and 'description' in parsed_json:
+                        image_description = parsed_json['description']
+                    else:
+                        # Use the original string if no description field found
+                        image_description = description_result
+                except (json_module.JSONDecodeError, ValueError):
+                    # If JSON parsing fails, use the string as-is
+                    image_description = description_result
+            else:
+                logger.warning(f"Unexpected result format from get_image_description: {type(description_result)}")
+                return original_image
+            
+            # Add description right after the image
+            augmented_image = f"{original_image}\n\n*Image Description: {image_description}*"
+            logger.debug(f"Augmented image with description: {image_url}")
+            return augmented_image
+            
+        except Exception as e:
+            logger.error(f"Failed to generate description for image {image_url}: {e}")
+            # Return original image if description generation fails
+            return original_image
+    
+    # Replace all images with augmented versions
+    augmented_content = re.sub(image_pattern, replace_image_with_description, content)
+    
+    return augmented_content
 
 def process_file(path: str):
     global docs_dir

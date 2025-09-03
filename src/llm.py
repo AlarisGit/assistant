@@ -712,7 +712,7 @@ def get_summarization(text: str, model_provider: str = config.SUM_MODEL, prompt_
     """Generate text summarization"""
     return generate_text('sum', text, model_provider=model_provider, prompt_options=prompt_options)
 
-def get_image_description(image: str, model_provider: str = config.RSP_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
+def get_image_description(image: str, model_provider: str = config.VSN_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
     """Generate image description using vision capabilities"""
     return generate_text('vsn', text='', image=image, model_provider=model_provider, prompt_options=prompt_options)
 
