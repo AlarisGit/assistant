@@ -131,6 +131,19 @@ DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
 logger.info("Configuration loaded.")
 
+# --- Rate limiting and metrics ---
+# Interval reporting in seconds. If set to 0, interval metrics are disabled.
+REPORT_INTERVAL_SECONDS = int(os.getenv("REPORT_INTERVAL_SECONDS", "60"))
+
+# Per-model+provider limits. If a model key is absent, no limits are applied for it.
+# Key format: "<model>@<provider>" (e.g., "gpt-5-nano@openai").
+# Values: {"rpm": int or None, "tpm": int or None}
+RATE_LIMITS = {
+    # Example:
+    # "gpt-5-nano@openai": {"rpm": 3000, "tpm": 180000},
+    # "gemini-2.5-flash@google": {"rpm": 60, "tpm": 60000},
+}
+
 def print_config():
     config_vars = {}
     for name, value in inspect.getmembers(sys.modules[__name__]):

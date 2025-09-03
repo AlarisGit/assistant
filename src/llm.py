@@ -15,6 +15,7 @@ from PIL import Image as PILImage
 import json
 import hashlib
 import string
+from ratelimit_metrics import RateLimitedMetricsProvider
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -508,6 +509,7 @@ class CachedProvider(BaseProvider):
         filtered.pop('request_timeout', None)
         filtered.pop('use_cache', None)
         filtered.pop('force_refresh', None)
+        filtered.pop('action', None)
         return filtered
 
     def _image_fingerprint(self, image: str) -> Optional[str]:
@@ -609,8 +611,9 @@ def get_provider(provider: str, api_key: str = None, **kwargs) -> BaseProvider:
             inner = OllamaProvider(api_key or '', base_url)
         else:
             raise ValueError(f"Unknown provider: {provider}")
-        # Wrap with caching proxy
-        _provider_cache[cache_key] = CachedProvider(inner, provider)
+        # Wrap with rate limiting + metrics, then caching proxy
+        rate_limited = RateLimitedMetricsProvider(inner, provider)
+        _provider_cache[cache_key] = CachedProvider(rate_limited, provider)
     
     return _provider_cache[cache_key]
 
@@ -703,7 +706,7 @@ def generate_text(action: str, text: str = '', history: List[Tuple[str, str]] = 
     prompt = f"{usr_prompt + '\n\n' if usr_prompt else ''}{text}"    
 
     provider = get_provider(provider_name)
-    return provider.generate_text(prompt, sys_prompt, history, image, model=model, **kwargs)
+    return provider.generate_text(prompt, sys_prompt, history, image, model=model, action=action, **kwargs)
 
 def get_summarization(text: str, model_provider: str = config.SUM_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
     """Generate text summarization"""
