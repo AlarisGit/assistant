@@ -1,3 +1,17 @@
+import config
+import logging
+import atexit
+import os
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, unquote
+import json
+import time
+from collections import deque
+import re
+import requests
+from bs4 import BeautifulSoup
+import urllib.robotparser as robotparser
+from markdownify import markdownify as _html_to_md
+
 def _strip_bom(s: str | None) -> str | None:
     """Remove leading UTF-8 BOM (\ufeff) if present."""
     if isinstance(s, str) and s.startswith("\ufeff"):
@@ -12,7 +26,7 @@ def _remove_bom_all(s: str | None) -> str | None:
     return s
 
 
-def _html_to_markdown_with_headings(html: str, page_title: str | None = None) -> str:
+def _html_to_markdown_with_headings(html: str, page_title: str | None = None, base_url: str | None = None) -> str:
     """Convert HTML body to Markdown, promoting likely section title elements to headings.
     Note: We intentionally do NOT prepend the page title; it is stored in metadata.
     - Elements with role="heading" (aria-level honored) become h1..h6
@@ -28,7 +42,12 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
             for tag in soup.find_all(t):
                 tag.decompose()
 
+        # Prepare holder for section title (may be inside the same table we remove)
+        section_title = None
+
         # Remove H&M Navigation table: <table> containing <p class="crumbs"><b>Navigation:</b>
+        # While removing, extract breadcrumb text for header
+        crumbs_text: str | None = None
         try:
             for tbl in soup.find_all("table"):
                 p = tbl.find("p", class_="crumbs")
@@ -36,6 +55,33 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
                     continue
                 b = p.find("b")
                 if b and "navigation:" in b.get_text(strip=True).lower():
+                    # Capture first H1 inside this table (if any) before removing it
+                    try:
+                        if section_title is None:
+                            h1_in_tbl = tbl.find("h1")
+                            if h1_in_tbl:
+                                section_title = h1_in_tbl.get_text(separator=" ", strip=True)
+                    except Exception:
+                        pass
+                    try:
+                        raw = p.get_text(separator=" ", strip=True)
+                        # Remove leading label
+                        raw = re.sub(r"^\s*Navigation:\s*", "", raw, flags=re.IGNORECASE)
+                        # Remove guillemets used as quotes around phrases (not separators)
+                        raw = raw.replace("«", "").replace("»", "")
+                        # Normalize arrow-like separators to '>' (keep only true separators)
+                        raw = raw.replace("›", ">").replace("→", ">")
+                        # Collapse whitespace around '>'
+                        raw = re.sub(r"\s*>\s*", " > ", raw)
+                        # Split and clean, drop trailing/leading empties and generic prompts
+                        parts = [seg.strip() for seg in raw.split('>') if seg and seg.strip() not in ("<<", ">>")]
+                        # Remove generic CTA or HM special phrases
+                        parts = [seg for seg in parts if not seg.lower().startswith("click to display table of contents")]
+                        parts = [seg for seg in parts if "no topics above this level" not in seg.lower()]
+                        if parts:
+                            crumbs_text = " > ".join(parts)
+                    except Exception:
+                        pass
                     tbl.decompose()
         except Exception:
             pass
@@ -79,6 +125,45 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
             if has_heading_hint:
                 el.name = "h2"
 
+        # Ensure all anchors and images have absolute URLs
+        if base_url:
+            try:
+                for a in soup.find_all("a", href=True):
+                    a["href"] = urljoin(base_url, a.get("href"))
+                for img in soup.find_all("img", src=True):
+                    img["src"] = urljoin(base_url, img.get("src"))
+            except Exception:
+                pass
+
+        # Remove any remaining breadcrumb/TOC elements to avoid duplicates in Markdown body
+        try:
+            # Standalone crumbs paragraphs not inside a table
+            for p in soup.find_all("p", class_="crumbs"):
+                p.decompose()
+            # Any element with sync-toc class (e.g., 'Click to Display Table of Contents')
+            for el in soup.find_all(class_="sync-toc"):
+                el.decompose()
+            # Any parent element that contains a <b>Navigation:</b> label
+            for b in soup.find_all("b"):
+                try:
+                    if "navigation:" in b.get_text(strip=True).lower():
+                        parent = b.parent
+                        if parent and getattr(parent, "decompose", None):
+                            parent.decompose()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Capture first H1 text (section title) from remaining DOM if not captured earlier
+        if section_title is None:
+            try:
+                h1 = soup.find("h1")
+                if h1:
+                    section_title = h1.get_text(separator=" ", strip=True)
+            except Exception:
+                section_title = None
+
         # Convert to Markdown with ATX heading style and strip non-content areas
         md = _html_to_md(
             str(soup),
@@ -92,24 +177,90 @@ def _html_to_markdown_with_headings(html: str, page_title: str | None = None) ->
         # 2) Split multiple inline bullets onto separate lines for readability
         for marker in (" - [", " * [", " + ["):
             md = md.replace(marker, "\n- [")
+        # Prepend Source and combined Crumbs (parents + section) at the very top of the Markdown
+        header_lines = []
+        if base_url:
+            header_lines.append(f"Source: {base_url}")
+        # Build combined crumbs: parents (if any) + section title (if present)
+        combined_crumbs = None
+        try:
+            # Normalize crumbs_text into a clean list of segments
+            parents_list = []
+            if crumbs_text:
+                # Split on separators (do NOT split on guillemets), drop empties/ctas and HM special phrases
+                raw_parts = re.split(r">|›|→", crumbs_text)
+                parents_list = [seg.strip().strip('«»') for seg in raw_parts if seg and seg.strip() and not seg.strip().lower().startswith("click to display table of contents")]
+                parents_list = [seg for seg in parents_list if "no topics above this level" not in seg.lower()]
+
+            sect = (section_title or "").strip()
+            if sect:
+                if not parents_list or parents_list[-1].strip().lower() != sect.lower():
+                    parents_list.append(sect)
+
+            if parents_list:
+                combined_crumbs = " > ".join(parents_list)
+        except Exception:
+            combined_crumbs = (crumbs_text or "").strip()
+        if combined_crumbs:
+            header_lines.append(f"Crumbs: {combined_crumbs}")
+        if header_lines:
+            md = "\n".join(header_lines) + "\n\n" + md
+            # Remove duplicate breadcrumb lines from the beginning of the body
+            try:
+                def _norm(s: str) -> str:
+                    s = (s or "")
+                    # replace non-breaking spaces
+                    s = s.replace("\xa0", " ")
+                    # unify arrow-like separators to '>'
+                    for sym in ("»", "›", "→"):
+                        s = s.replace(sym, ">")
+                    # collapse spaces around '>'
+                    s = re.sub(r"\s*>\s*", ">", s)
+                    # collapse multiple spaces
+                    s = re.sub(r"\s+", " ", s)
+                    return s.strip()
+
+                def _tokens(s: str) -> set[str]:
+                    s = (s or "").lower()
+                    s = s.replace("\xa0", " ")
+                    # keep letters/numbers and spaces
+                    s = re.sub(r"[^a-z0-9\s]", " ", s)
+                    toks = [t for t in s.split() if t]
+                    return set(toks)
+
+                lines = md.splitlines()
+                start_idx = len(header_lines) + 1  # header + blank line
+                end_idx = min(len(lines), start_idx + 60)
+                target = _norm(combined_crumbs or "")
+                title_tokens = _tokens(section_title or "")
+                filtered = []
+                for i, line in enumerate(lines):
+                    if i >= start_idx and i < end_idx:
+                        ln = _norm(line)
+                        if ln == target:
+                            # skip duplicate crumbs line
+                            continue
+                        # Heuristic: if line looks like crumbs and last segment ~equals section title
+                        if ">" in ln and title_tokens:
+                            segments = [seg.strip() for seg in ln.split(">") if seg.strip()]
+                            if segments:
+                                last = segments[-1]
+                                last_tokens = _tokens(last)
+                                if last_tokens:
+                                    inter = title_tokens.intersection(last_tokens)
+                                    # proportion of title tokens covered
+                                    coverage = len(inter) / max(1, len(title_tokens))
+                                    if coverage >= 0.8:
+                                        continue
+                    filtered.append(line)
+                md = "\n".join(filtered)
+            except Exception:
+                pass
         return _remove_bom_all(md) or md
     except Exception as e:
         logger.debug(f"Markdown conversion fallback: {e}")
         return _remove_bom_all(_html_to_md(_remove_bom_all(_strip_bom(html)) or "", heading_style="ATX", strip=["script", "style"]).strip()) or ""
 
-import config
-import logging
-import atexit
-import os
-from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, unquote
-import json
-import time
-from collections import deque
-import re
-import requests
-from bs4 import BeautifulSoup
-import urllib.robotparser as robotparser
-from markdownify import markdownify as _html_to_md
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -570,8 +721,8 @@ def crawl_site(base_url: str, start_path: str = "/", max_pages: int = DEFAULT_MA
             t, d = _extract_title_description(html)
             meta["title"] = t
             meta["description"] = d
-            # Convert HTML to Markdown (promote section titles to headings) and save
-            md_text = _html_to_markdown_with_headings(html, page_title=t)
+            # Convert HTML to Markdown (promote section titles to headings), make links absolute, and save
+            md_text = _html_to_markdown_with_headings(html, page_title=t, base_url=url)
             md_path = _save_markdown(site_md_dir, url, md_text)
             meta["saved_md_path"] = os.path.relpath(md_path, md_root_dir)
             links = _extract_links(url, html)
