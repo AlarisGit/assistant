@@ -35,7 +35,7 @@ CRITICAL REFERENCE FORMAT RULES:
 CONVERSATION CONTEXT:
 {conversation_context}
 
-KEY ENTITIES TO ADDRESS: {', '.join(entities)}
+KEY ENTITIES TO ADDRESS: {entities}
 
 ---
 
