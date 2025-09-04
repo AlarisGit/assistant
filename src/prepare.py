@@ -5,7 +5,7 @@ import os
 import json
 import hashlib
 import re
-from llm import get_image_description
+from llm import get_image_description, get_summarization
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -71,6 +71,45 @@ def process_markdown_content(content: str) -> Dict[str, Any]:
     augmented_content = _augment_images_with_descriptions(cleaned_content)
     result_dict['content'] = augmented_content
     result_dict['original_content'] = cleaned_content
+    
+    # Generate summary for the augmented content
+    try:
+        logger.info("Generating summary for augmented content")
+        summary_result = get_summarization(augmented_content)
+        
+        # Handle both dict and JSON string return formats
+        if isinstance(summary_result, dict):
+            result_dict.update(summary_result)
+            logger.debug(f"Merged summary keys: {list(summary_result.keys())}")
+        elif isinstance(summary_result, str):
+            # Try to parse as JSON first
+            try:
+                import json as json_module
+                # Remove markdown code block formatting if present
+                clean_result = summary_result.strip()
+                if clean_result.startswith('```json'):
+                    clean_result = clean_result[7:]  # Remove ```json
+                if clean_result.endswith('```'):
+                    clean_result = clean_result[:-3]  # Remove ```
+                clean_result = clean_result.strip()
+                
+                parsed_json = json_module.loads(clean_result)
+                if isinstance(parsed_json, dict):
+                    result_dict.update(parsed_json)
+                    logger.debug(f"Parsed and merged JSON summary keys: {list(parsed_json.keys())}")
+                else:
+                    # If parsed JSON is not a dict, store as 'summary' key
+                    result_dict['summary'] = parsed_json
+                    logger.debug("Stored parsed JSON summary in 'summary' key")
+            except (json_module.JSONDecodeError, ValueError):
+                # If JSON parsing fails, use the string as-is
+                result_dict['summary'] = summary_result
+                logger.debug("Stored string summary in 'summary' key (JSON parsing failed)")
+        else:
+            logger.warning(f"Unexpected summary result format: {type(summary_result)}")
+    except Exception as e:
+        logger.error(f"Failed to generate summary: {e}")
+        # Continue without summary if it fails
     
     return result_dict
 
@@ -158,15 +197,8 @@ def process_file(path: str):
             # Build document dictionary with extracted metadata
             doc_dict["id"] = doc_id
             doc_dict["source_path"] = path
-            doc_dict["content"] = processed_result["content"]
-            
-            # Add extracted metadata if available
-            if "source" in processed_result:
-                doc_dict["source"] = processed_result["source"]
-            if "crumbs" in processed_result:
-                doc_dict["crumbs"] = processed_result["crumbs"]
-            if "description" in processed_result:
-                doc_dict["description"] = processed_result["description"]
+
+            doc_dict.update(processed_result)
             
             # Save processed document
             output_path = os.path.join(docs_dir, doc_id + ".json")
