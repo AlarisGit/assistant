@@ -64,7 +64,9 @@ def process_markdown_content(content: str) -> Dict[str, Any]:
     # Search for breadcrumbs
     crumbs_match = re.search(crumbs_pattern, content, re.IGNORECASE | re.MULTILINE)
     if crumbs_match:
-        result_dict['crumbs'] = crumbs_match.group(1).strip()
+        crumbs_string = crumbs_match.group(1).strip()
+        # Split by '>' and strip whitespace from each item
+        result_dict['crumbs'] = [item.strip() for item in crumbs_string.split('>') if item.strip()]
         logger.debug(f"Extracted crumbs: {result_dict['crumbs']}")
     
     # Search for description
