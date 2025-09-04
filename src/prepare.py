@@ -9,6 +9,7 @@ import re
 import tiktoken
 from llm import get_image_description, get_summarization
 from config import MIN_CHUNK_TOKENS, MAX_CHUNK_TOKENS, OVERLAP_CHUNK_TOKENS
+from qdrant import store_chunk
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -402,6 +403,17 @@ def process_file(path: str):
             doc_dict["source_path"] = path
             doc_dict.update(processed_result)
             
+            # Store chunks in Qdrant
+            for i, chunk in enumerate(doc_dict['chunks']):
+                store_chunk(chunk, doc_dict['id'], f"chunk_{i}")
+
+            for i, keypoint in enumerate(doc_dict['keypoints']):
+                store_chunk(keypoint, doc_dict['id'], f"keypoint_{i}")
+
+            for attr in ['summary', 'description']:
+                if attr in doc_dict and doc_dict[attr]:
+                    store_chunk(doc_dict[attr], doc_dict['id'], attr)
+
             # Save processed document with chunks included
             output_path = os.path.join(docs_dir, doc_id + ".json")
             with open(output_path, 'w', encoding='utf-8') as f:
