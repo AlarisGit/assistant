@@ -9,4 +9,6 @@ openpyxl
 httpx[socks]
 tiktoken
 pillow
+qdrant-client
+
 
