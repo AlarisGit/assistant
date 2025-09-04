@@ -129,17 +129,6 @@ class MetricsAggregator:
             return dict(self.totals)
 
 
-def _format_table(rows: List[List[str]]) -> str:
-    if not rows:
-        return ""
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    lines = []
-    for ri, r in enumerate(rows):
-        pad = [r[i].ljust(widths[i]) for i in range(len(r))]
-        lines.append(" ".join(pad))
-        if ri == 0:
-            lines.append(" ".join('-' * w for w in widths))
-    return "\n".join(lines)
 
 
 _metrics = MetricsAggregator()
@@ -171,34 +160,24 @@ class _Reporter:
                 continue
             
             # Get interval stats
-            rows: List[List[str]] = [[
-                'provider', 'model', 'action', 'req', 'in_tok', 'out_tok', 'avg_lat ms', 'out_tok/s'
-            ]]
+            lines = ["provider     model        action   req  in_tok out_tok avg_lat ms out_tok/s",
+                     "--------     -----        ------   ---  ------ ------- ---------- ---------"]
             for (prov, model, action), s in sorted(snap.items()):
                 avg_lat = (s['lat_sum'] / max(1, s['lat_cnt']))
                 # throughput based on avg latency per request (very rough)
                 sec = max(0.001, avg_lat / 1000.0)
                 tps = int(s['out_tok'] / max(1.0, (s['req'] * sec)))
-                rows.append([
-                    prov, model, action,
-                    str(int(s['req'])), str(int(s['in_tok'])), str(int(s['out_tok'])),
-                    f"{avg_lat:.0f}", str(int(tps))
-                ])
-            interval_table = _format_table(rows)
+                lines.append(f"{prov:<12} {model:<12} {action:<8} {int(s['req']):>3} {int(s['in_tok']):>6} {int(s['out_tok']):>7} {avg_lat:>10.0f} {tps:>9}")
+            interval_table = "\n".join(lines)
             
             # Get cumulative totals
             totals_snap = _metrics.snapshot_totals()
-            totals_rows: List[List[str]] = [[
-                'provider', 'model', 'action', 'req', 'in_tok', 'out_tok', 'avg_lat ms', 'errors', 'retries'
-            ]]
+            totals_lines = ["provider     model        action   req  in_tok out_tok avg_lat ms errors retries",
+                           "--------     -----        ------   ---  ------ ------- ---------- ------ -------"]
             for (prov, model, action), s in sorted(totals_snap.items()):
                 avg_lat = (s['lat_sum'] / max(1, s['lat_cnt']))
-                totals_rows.append([
-                    prov, model, action,
-                    str(int(s['req'])), str(int(s['in_tok'])), str(int(s['out_tok'])),
-                    f"{avg_lat:.0f}", str(int(s['errors'])), str(int(s['retries']))
-                ])
-            totals_table = _format_table(totals_rows)
+                totals_lines.append(f"{prov:<12} {model:<12} {action:<8} {int(s['req']):>3} {int(s['in_tok']):>6} {int(s['out_tok']):>7} {avg_lat:>10.0f} {int(s['errors']):>6} {int(s['retries']):>7}")
+            totals_table = "\n".join(totals_lines)
             
             # Log both interval and cumulative stats
             logger.info("Operation stats (last interval)\n" + interval_table)
@@ -213,17 +192,12 @@ def _print_totals():
     snap = _metrics.snapshot_totals()
     if not snap:
         return
-    rows: List[List[str]] = [[
-        'provider', 'model', 'action', 'req', 'in_tok', 'out_tok', 'avg_lat ms', 'errors', 'retries'
-    ]]
+    lines = ["provider     model        action   req  in_tok out_tok avg_lat ms errors retries",
+             "--------     -----        ------   ---  ------ ------- ---------- ------ -------"]
     for (prov, model, action), s in sorted(snap.items()):
         avg_lat = (s['lat_sum'] / max(1, s['lat_cnt']))
-        rows.append([
-            prov, model, action,
-            str(int(s['req'])), str(int(s['in_tok'])), str(int(s['out_tok'])),
-            f"{avg_lat:.0f}", str(int(s['errors'])), str(int(s['retries']))
-        ])
-    table = _format_table(rows)
+        lines.append(f"{prov:<12} {model:<12} {action:<8} {int(s['req']):>3} {int(s['in_tok']):>6} {int(s['out_tok']):>7} {avg_lat:>10.0f} {int(s['errors']):>6} {int(s['retries']):>7}")
+    table = "\n".join(lines)
     logger.info("Totals (cumulative)\n" + table)
 
 
