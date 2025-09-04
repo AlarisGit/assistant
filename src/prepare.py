@@ -18,6 +18,20 @@ docs_dir = os.path.join(config.DATA_DIR, "docs")
 
 os.makedirs(docs_dir, exist_ok=True)
 
+# Initialize tokenizer for token counting
+try:
+    encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 tokenizer
+except Exception:
+    # Fallback to simple word-based estimation
+    encoding = None
+    
+def count_tokens(text: str) -> int:
+    if encoding:
+        return len(encoding.encode(text))
+    else:
+        # Rough estimation: ~1.3 tokens per word
+        return int(len(text.split()) * 1.3)
+ 
 def process_markdown_content(content: str) -> Dict[str, Any]:
     """
     Process markdown content and extract metadata including source and crumbs.
@@ -74,6 +88,9 @@ def process_markdown_content(content: str) -> Dict[str, Any]:
     augmented_content = _augment_images_with_descriptions(cleaned_content)
     result_dict['content'] = augmented_content
     result_dict['original_content'] = cleaned_content
+
+    result_dict['content_tokens'] = count_tokens(augmented_content)
+    result_dict['original_content_tokens'] = count_tokens(cleaned_content)
     
     # Generate summary for the augmented content
     try:
@@ -117,7 +134,7 @@ def process_markdown_content(content: str) -> Dict[str, Any]:
     # Generate smart chunks from the processed content
     chunks = smart_chunk_content(augmented_content, result_dict)
     result_dict['chunks'] = chunks
-    logger.info(f"Generated {len(chunks)} chunks for content")
+    logger.info(f"Generated {len(chunks)} chunks for content of {result_dict['content_tokens']}/{result_dict['original_content_tokens']} tokens")
     
     return result_dict
 
@@ -132,20 +149,7 @@ def smart_chunk_content(content: str, doc_metadata: Dict[str, Any]) -> List[str]
     Returns:
         List of content strings (chunks)
     """
-    # Initialize tokenizer for token counting
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 tokenizer
-    except Exception:
-        # Fallback to simple word-based estimation
-        encoding = None
-    
-    def count_tokens(text: str) -> int:
-        if encoding:
-            return len(encoding.encode(text))
-        else:
-            # Rough estimation: ~1.3 tokens per word
-            return int(len(text.split()) * 1.3)
-    
+   
     # Split content into sentences while preserving image descriptions
     sentences = _split_into_sentences_with_images(content)
     
