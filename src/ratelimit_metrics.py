@@ -169,6 +169,8 @@ class _Reporter:
             snap = _metrics.snapshot_and_reset_interval()
             if not snap:
                 continue
+            
+            # Get interval stats
             rows: List[List[str]] = [[
                 'provider', 'model', 'action', 'req', 'in_tok', 'out_tok', 'avg_lat ms', 'out_tok/s'
             ]]
@@ -182,8 +184,25 @@ class _Reporter:
                     str(int(s['req'])), str(int(s['in_tok'])), str(int(s['out_tok'])),
                     f"{avg_lat:.0f}", str(int(tps))
                 ])
-            table = _format_table(rows)
-            logger.info("Operation stats (last interval)\n" + table)
+            interval_table = _format_table(rows)
+            
+            # Get cumulative totals
+            totals_snap = _metrics.snapshot_totals()
+            totals_rows: List[List[str]] = [[
+                'provider', 'model', 'action', 'req', 'in_tok', 'out_tok', 'avg_lat ms', 'errors', 'retries'
+            ]]
+            for (prov, model, action), s in sorted(totals_snap.items()):
+                avg_lat = (s['lat_sum'] / max(1, s['lat_cnt']))
+                totals_rows.append([
+                    prov, model, action,
+                    str(int(s['req'])), str(int(s['in_tok'])), str(int(s['out_tok'])),
+                    f"{avg_lat:.0f}", str(int(s['errors'])), str(int(s['retries']))
+                ])
+            totals_table = _format_table(totals_rows)
+            
+            # Log both interval and cumulative stats
+            logger.info("Operation stats (last interval)\n" + interval_table)
+            logger.info("Progress totals (cumulative)\n" + totals_table)
 
 
 _reporter = _Reporter(getattr(config, 'REPORT_INTERVAL_SECONDS', 60))
