@@ -10,5 +10,8 @@ httpx[socks]
 tiktoken
 pillow
 qdrant-client
-
-
+langdetect
+python-telegram-bot>=20.0
+asyncio
+async_timeout
+aiohttp
