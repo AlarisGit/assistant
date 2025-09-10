@@ -7,7 +7,7 @@ import time
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import NetworkError, TimedOut, RetryAfter, BadRequest
-#from assistant import process_user_message, clear_conversation_history
+import assistant
 import atexit
 import os
 import json
@@ -117,7 +117,7 @@ class TelegramBot:
             return
         
         # Clear conversation history for this user
-        cleared = clear_conversation_history(user_id)
+        cleared = await assistant.clear_conversation_history(user_id)
         
         if cleared:
             await self._retry_with_backoff(
@@ -241,13 +241,11 @@ class TelegramBot:
                 "🤔 Thinking..."
             )
             
-            # Process message through the assistant
-            conversation_id = user_id
 
-            #The sleep is just an emulation of some processing time
-            await asyncio.sleep(5)
-            
-            message = f"This is an echo auto-reply to {conversation_id}: {message_text}"
+            response = await assistant.process_user_message(user_id, message_text)
+            message = response.get("message", None)
+            if not message:
+                message = "I'm sorry, but I couldn't generate a response. Please try again later."
             image_urls = None
 
             # Replace "Thinking..." message with text response
@@ -256,6 +254,7 @@ class TelegramBot:
                 # Telegram message limit is 4096 characters
                 MAX_MESSAGE_LENGTH = 4000  # Leave some buffer for HTML tags
                 
+
                 if len(message) <= MAX_MESSAGE_LENGTH:
                     # Message fits in one piece
                     await self._retry_with_backoff(
