@@ -201,7 +201,7 @@ class TelegramBot:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
         help_message = (
-            "🤖 Alaris SMS Platform Assistant Help\n\n"
+            f"🤖 Alaris SMS Platform Assistant v{config.VERSION} Help\n\n"
             "I can answer questions about:\n"
             "• Platform overview & UI navigation\n"
             "• Administration & System settings\n"

@@ -130,6 +130,8 @@ TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
+VERSION = os.getenv("VERSION", "1.0.1")
+
 logger.info("Configuration loaded.")
 
 # --- Rate limiting and metrics ---
