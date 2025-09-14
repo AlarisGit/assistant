@@ -121,6 +121,13 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", f"assistant_{EMB_MODEL.split('@')[0]}")
 
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_USERNAME = os.getenv("REDIS_USERNAME") or None
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
+
 MIN_CHUNK_TOKENS = int(os.getenv("MIN_CHUNK_TOKENS", 50))
 OVERLAP_CHUNK_TOKENS = int(os.getenv("OVERLAP_CHUNK_TOKENS", 75))
 MAX_CHUNK_TOKENS = int(os.getenv("MAX_CHUNK_TOKENS", 512))
