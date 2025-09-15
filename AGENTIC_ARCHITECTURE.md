@@ -30,7 +30,7 @@ This document defines the Redis Streams-based architecture for the SMS Platform 
 
 **Initial PoC Pipeline:**
 ```
-manager → translate → clarify → search_docs → summarize → reply_list
+manager → translate → clarify → search_docs → summarize → quality_control → reply_list
 ```
 
 #### Core Agents
