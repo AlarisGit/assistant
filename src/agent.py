@@ -75,12 +75,11 @@ TABLE OF CONTENTS
   * Sender: sender_role, sender_agent_id
   * Semantics: kind ∈ {"task", "result", "control", "status"}
   * Payload: arbitrary JSON (domain data + control flags)
-  * Reply routing: reply_role | reply_agent_id | reply_list
   * Trace: a list of breadcrumbs for debugging
   * Timestamps: ts (float)
 
 - Final responses for external callers:
-  * The "reply_list" is a per-request Redis LIST where the final Envelope is
+  * The "result_list" is a per-request Redis LIST where the final Envelope is
     pushed (LPUSH). The caller BRPOP's from it to get the result.
 
 --------------------------------------------------------------------------------
@@ -99,11 +98,6 @@ TABLE OF CONTENTS
     PUBLISH "broadcast:all" | "broadcast:role:{role}" json({"cmd": ...})
   All subscribers receive and handle it (e.g., "shutdown", "reload").
 
-- Default routing policy after process():
-  * If reply_role is set → route to that role stream (next hop).
-  * Else if reply_agent_id is set → route to that agent's stream.
-  * Else if reply_list is set → push to LIST (final).
-  * Else → drop (no route defined).
 
 --------------------------------------------------------------------------------
 5) REDIS KEYS AND CONSUMER GROUPS
@@ -112,7 +106,6 @@ TABLE OF CONTENTS
 - Agent streams:    stream:agent:{agent_id}
 - Consumer groups:  cg:role:{role}, cg:agent:{agent_id}
 - Broadcast:        broadcast:all, broadcast:role:{role}
-- Reply lists:      reply:{message_id}
 
 - Ensure groups exist with MKSTREAM (see ensure_group()).
 - We use XACK after processing.
@@ -192,9 +185,9 @@ TABLE OF CONTENTS
 12) USAGE PATTERNS
 --------------------------------------------------------------------------------
 A) External caller (see process_request()):
-   - Build message_id and reply_list
+   - Build message_id and result_list
    - Send an initial Envelope to role 'manager'
-   - BRPOP reply_list for the final result
+   - BRPOP result_list for the final result
 
 B) Broadcast commands:
    - await broadcast_command("shutdown")                  # all agents
@@ -238,6 +231,7 @@ import socket
 import time
 from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Optional, List
+from datetime import datetime
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
@@ -301,9 +295,10 @@ class Envelope:
 
     Fields:
       conversation_id: logical request correlation key (cross-message)
-      message_id:     unique per-message identifier (e.g., f"{conv}:{time.time()}")
-      target_role:    desired role to handle this message; None for "any role" (rare)
-      target_agent_id:direct agent id; when set, message is for stream:agent:{id}
+      message_id:      unique per-message identifier (e.g., f"{conv}:{time.time()}")
+      target_role:     desired role to handle this message; None for "any role" (rare)
+      target_agent_id: direct agent id; when set, message is for stream:agent:{id}
+      target_list:     direct list id; when set, message is for list:{id}
 
       sender_role:     role of the sender (for audit/debug)
       sender_agent_id: concrete agent id of the sender
@@ -312,16 +307,13 @@ class Envelope:
       payload:arbitrary JSON (domain inputs/outputs, control flags, errors)
       ts:     unix timestamp
 
-      reply_role:      next-hop role (pipeline continuation)
-      reply_agent_id:  next-hop direct agent id (sticky routing)
-      reply_list:      final sink for external responses (BRPOP by caller)
-
       trace: Breadcrumbs to trace the path (agent id, role, ts, notes)
     """
     conversation_id: str
     message_id: str
     target_role: Optional[str]
     target_agent_id: Optional[str]
+    target_list: Optional[str]
 
     sender_role: str
     sender_agent_id: str
@@ -329,10 +321,6 @@ class Envelope:
     kind: str
     payload: Dict[str, Any]
     ts: float
-
-    reply_role: Optional[str]
-    reply_agent_id: Optional[str]
-    reply_list: Optional[str]
 
     result_list: str
 
@@ -347,6 +335,9 @@ class Envelope:
         """Deserialize from XREAD/XREADGROUP raw fields."""
         env = json.loads(fields[b"envelope"].decode("utf-8"))
         return Envelope(**env)
+    
+    def __str__(self) -> str:
+        return json.dumps(asdict(self), ensure_ascii=False, indent=2)
 
 # -------------------------- Redis helpers --------------------------
 
@@ -385,8 +376,7 @@ class BaseAgent:
     Override process(env) in subclasses:
       - Do work (I/O, CPU, etc.).
       - Set env.kind to "result" (or "task" if forwarding).
-      - Decide next hop by setting env.reply_role / env.reply_agent_id /
-        env.reply_list (final).
+        env.result_list (final).
     """
 
     def __init__(
@@ -475,15 +465,15 @@ class BaseAgent:
 
                             # Accept tasks for this role or unspecified role; ignore direct-targets here
                             if env.target_role not in (None, self.role):
-                                logger.debug(f"[{self.role}:{self.agent_id}] Skipping message for role {env.target_role}: {env.message_id}")
+                                logger.info(f"[{self.role}:{self.agent_id}] Skipping message for role {env.target_role}: {env.message_id}")
                                 await self.redis.xack(self._role_stream, self._role_group, msg_id)
                                 continue
                             if env.target_agent_id is not None:
-                                logger.debug(f"[{self.role}:{self.agent_id}] Skipping direct message for agent {env.target_agent_id}: {env.message_id}")
+                                logger.info(f"[{self.role}:{self.agent_id}] Skipping direct message for agent {env.target_agent_id}: {env.message_id}")
                                 await self.redis.xack(self._role_stream, self._role_group, msg_id)
                                 continue
 
-                            logger.info(f"[{self.role}:{self.agent_id}] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')} reply_list: {env.reply_list}")
+                            logger.info(f"[{self.role}:{self.agent_id}] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
 
                             await self._handle_envelope(env)
                         finally:
@@ -567,101 +557,87 @@ class BaseAgent:
     # ---- envelope handling ----
 
     async def _handle_envelope(self, env: Envelope) -> None:
-        """Process an envelope with timeout and error handling."""
+        """Process an envelope with timeout and error handling.
+        
+        Automatically sets up return routing to sender by default.
+        Agents can override this behavior in their process() method.
+        Adds execution trace with timing and error information.
+        """
         if env.kind == "control":
             return
 
         if env.kind in ("task", "result"):
             # All agents should set busy flag for proper load balancing
             self._busy.set()
+            logger.info(f"Incoming: {env}")
+
+            trace_item = {}
+            trace_item['start_ts'] = time.time()
+            trace_item['role'] = self.role
+            trace_item['agent_id'] = self.agent_id
+
+            #By default envelope after process() will be sent back to sender
+            #More complex agent implementation can override this behavior
+            env.target_role = env.sender_role
+            env.target_agent_id = None
+            env.target_list = None
+
+
             try:
-                env.trace.append({
-                    "agent_id": self.agent_id,
-                    "role": self.role,
-                    "ts": time.time(),
-                    "action": "start_process",
-                })
                 timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
+                logger.info(f"Timeout: {timeout}")
                 await self._publish_status("process")
+                await asyncio.sleep(1)
                 env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
+                logger.info(f"After process: {env2}")
                 if env2 is not None:
-                    env2.trace.append({
-                        "agent_id": self.agent_id,
-                        "role": self.role,
-                        "ts": time.time(),
-                        "action": "end_process",
-                    })
-                    await self._default_route_after_process(env2)
+                    env = env2
+
+                exception = None
             except asyncio.TimeoutError:
-                await self._emit_error(env, "timeout", "Task exceeded safety timeout")
+                exception = f"Task exceeded safety timeout: {self.task_timeout_sec}"
+                logger.error(exception)
             except Exception as e:
-                await self._emit_error(env, "exception", repr(e))
-            finally:
-                await self._publish_status("idle")
-                self._busy.clear()
+                logger.error(f"[BaseAgent] Exception in process: {e}")
+                exception = repr(e)
+                
+            trace_item['end_ts'] = time.time()
+            trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
+            if exception:
+                trace_item['exception'] = exception
+            
+            env.trace.append(trace_item)
+            
+            logger.info(f"Outgoing: {env}")
 
-    async def _default_route_after_process(self, env: Envelope) -> None:
-        """Route envelope after processing to reply destination."""
-        if env.reply_agent_id:
-            await self._send_to_agent(env.reply_agent_id, env)
-        elif env.reply_role:
-            await self._send_to_role(env.reply_role, env)
-        elif env.reply_list:
-            await self._send_to_list(env.reply_list, env)
-        else:
-            logger.warning(f"[{self.role}:{self.agent_id}] No reply destination for envelope {env.message_id}")
+            await self._send(env)
 
-    async def _emit_error(self, env: Envelope, code: str, message: str) -> None:
-        """Append error into payload, mark as 'result', and default-route."""
-        env.payload.setdefault("errors", []).append({"code": code, "message": message})
-        env.kind = "result"
-        await self._default_route_after_process(env)
+            await self._publish_status("idle")
+            self._busy.clear()
 
-    # ---- send helpers ----
+    async def _send(self, env: Envelope) -> None:
+        """Send envelope to target destination.
+        
+        Routes based on target fields:
+        - target_role: sends to role stream (load balanced)
+        - target_agent_id: sends to specific agent stream
+        - target_list: pushes raw JSON to Redis list for external consumers
+        
+        Updates sender information and timestamp before sending.
+        """
+        env.sender_role = self.role
+        env.sender_agent_id = self.agent_id
+        env.ts = time.time()
 
-    async def _send_to_role(self, role: str, env: Envelope) -> None:
-        role_stream = role_stream_key(role)
-        env2 = replace(env,
-            target_role=role,
-            target_agent_id=None,
-            sender_role=self.role,
-            sender_agent_id=self.agent_id,
-            reply_agent_id=None,
-            reply_role=None,
-            reply_list=None,
-            ts=time.time(),
-        )
-        logger.info(f"[{self.role}:{self.agent_id}] Sending to role {role}: {env.message_id}")
-        await xadd(self.redis, role_stream, env2.to_stream_fields())
-
-    async def _send_to_agent(self, agent_id: str, env: Envelope) -> None:
-        agent_stream = agent_stream_key(agent_id)
-        env2 = replace(env,
-            target_role=env.target_role,  # may be preserved as a hint
-            target_agent_id=agent_id,
-            sender_role=self.role,
-            sender_agent_id=self.agent_id,
-            reply_agent_id=None,
-            reply_role=None,
-            reply_list=None,
-            ts=time.time(),
-        )
-        logger.info(f"[{self.role}:{self.agent_id}] Sending to agent {agent_id}: {env.message_id}")
-        await xadd(self.redis, agent_stream, env2.to_stream_fields())
-    
-    async def _send_to_list(self, list_name: str, env: Envelope) -> None:
-        env2 = replace(env,
-            target_role=env.target_role,  # may be preserved as a hint
-            target_agent_id=env.target_agent_id,
-            sender_role=self.role,
-            sender_agent_id=self.agent_id,
-            reply_agent_id=None,
-            reply_role=None,
-            reply_list=None,
-            ts=time.time(),
-        )
-        logger.info(f"[{self.role}:{self.agent_id}] Sending to list {list_name}: {env.message_id}")
-        await xadd(self.redis, list_name, env2.to_stream_fields())
+        if env.target_role:
+            logger.info(f"[{self.role}:{self.agent_id}] Sending to role {env.target_role}: {env.message_id}")
+            await xadd(self.redis, role_stream_key(env.target_role), env.to_stream_fields())
+        elif env.target_agent_id:
+            logger.info(f"[{self.role}:{self.agent_id}] Sending to agent {env.target_agent_id}: {env.message_id}")
+            await xadd(self.redis, agent_stream_key(env.target_agent_id), env.to_stream_fields())
+        elif env.target_list:
+            logger.info(f"[{self.role}:{self.agent_id}] Sending to list {env.target_list}: {env.message_id}")
+            await self.redis.lpush(env.target_list, json.dumps(asdict(env), ensure_ascii=False))
 
     async def _publish_status(self, event: str) -> None:
         """Publish lifecycle/status to role 'stat' broadcast channel."""
@@ -682,74 +658,60 @@ class BaseAgent:
 # -------------------------- Concrete agents --------------------------
 
 class ManagerAgent(BaseAgent):
+    """Pipeline orchestrator that routes messages through processing stages.
+    
+    Implements a simple state machine:
+    - start -> uppercase -> reverse -> final result
+    
+    Includes run counter for demo purposes with safety limit.
     """
-    Dynamic router example:
-      client(task 'start') -> manager -> uppercase (result) -> manager -> reverse (result) -> manager -> reply_list
-
-    The manager determines the next hop based on env.payload['stage'] and sets
-    reply_role back to 'manager' until the final stage, where it leaves reply_list
-    set and clears reply_role (so BaseAgent routes to the per-request list).
-    """
-
+    
     def __init__(self, redis: Redis):
         super().__init__(redis, role="manager")
+        self.run_counter = 0
 
     async def process(self, env: Envelope) -> Envelope:
-        """Route messages through the pipeline stages."""
+        """Route messages through the pipeline stages.
+        
+        State machine logic:
+        1. task + start -> route to uppercase
+        2. result + upper -> route to reverse  
+        3. result + reverse -> send to result_list for external caller
+        
+        Returns modified envelope with updated routing information.
+        """
         stage = env.payload.get("stage", "start")
         logger.info(f"[ManagerAgent] Processing {env.kind} at stage '{stage}' for {env.message_id}")
+        logger.info(f"[ManagerAgent] Incoming: {env}")
+
+        self.run_counter += 1
+        logger.info(f"[ManagerAgent] Run counter: {self.run_counter}")
+        if self.run_counter > 10:
+            raise Exception("Too many runs")
         
         if env.kind == "task" and stage == "start":
-            # Send task to uppercase agent, result should come back to manager
-            new_env = Envelope(
-                conversation_id=env.conversation_id,
-                message_id=env.message_id,
-                target_role="uppercase",
-                target_agent_id=None,
-                sender_role=self.role,
-                sender_agent_id=self.agent_id,
-                kind="task",
-                payload={**env.payload, "stage": "after_upper"},
-                ts=time.time(),
-                reply_role="manager",  # Result should come back to manager
-                reply_agent_id=None,
-                reply_list=None,
-                trace=env.trace + [{"agent_id": self.agent_id, "role": self.role, "action": "route_to_uppercase"}],
-            )
-            logger.info(f"[ManagerAgent] Sending task to uppercase: {env.message_id}")
-            self._send_to_role("uppercase", new_env)
-            return None
+            env.target_role = "uppercase"
+            env.payload["stage"] = "upper"
+            logger.info(f"[ManagerAgent] Sending task to uppercase")
+            return env
         
-        if env.kind == "result" and stage == "after_upper":
-            # Send task to reverse agent, result should come back to manager
-            new_env = Envelope(
-                conversation_id=env.conversation_id,
-                message_id=env.message_id,
-                target_role="reverse",
-                target_agent_id=None,
-                sender_role=self.role,
-                sender_agent_id=self.agent_id,
-                kind="task",
-                payload={**env.payload, "stage": "after_reverse"},
-                ts=time.time(),
-                reply_role="manager",  # Result should come back to manager
-                reply_agent_id=None,
-                reply_list=None,
-                trace=env.trace + [{"agent_id": self.agent_id, "role": self.role, "action": "route_to_reverse"}],
-            )
-            logger.info(f"[ManagerAgent] Sending task to reverse: {env.message_id}")
-            await self._send_to_role("reverse", new_env)
-            return None
+        if env.kind == "result" and stage == "upper":
+            env.kind = "task"
+            env.target_role = "reverse"
+            env.payload["stage"] = "reverse"
+            logger.info(f"[ManagerAgent] Sending task to reverse")
+            return env
         
-        if env.kind == "result" and stage == "after_reverse":
-            # Final result - send to reply list
-            logger.info(f"[ManagerAgent] Final result ready: {env.message_id}")
-            if env.reply_list:
-                await self._send_to_list(env.result_list, env)
+        if env.kind == "result" and stage == "reverse":
+            logger.info(f"[ManagerAgent] Final result ready: {env}")
+            if env.result_list:
+                env.target_list = env.result_list
+                env.target_role = None
+                env.target_agent_id = None
             return env
         
         # Unknown stage
-        logger.error(f"[ManagerAgent] Unknown stage '{stage}' for {env.kind}: {env.message_id}")
+        logger.error(f"[ManagerAgent] Unknown stage '{stage}' for {env}")
         env.payload.setdefault("errors", []).append({
             "code": "manager.stage",
             "message": f"Unknown stage '{stage}' for kind '{env.kind}'",
@@ -758,41 +720,60 @@ class ManagerAgent(BaseAgent):
 
 
 class UppercaseAgent(BaseAgent):
-    """Example worker: converts payload['text'] to uppercase and returns 'result'."""
+    """Example worker: converts payload['text'] to uppercase and returns 'result'.
+    
+    Demonstrates basic text transformation agent pattern.
+    Changes envelope kind from 'task' to 'result' after processing.
+    """
+    
     def __init__(self, redis: Redis):
         super().__init__(redis, role="uppercase")
 
     async def process(self, env: Envelope) -> Envelope:
-        """Convert text to uppercase."""
+        """Convert text to uppercase.
+        
+        Transforms payload['text'] to uppercase and marks envelope as 'result'.
+        Logs processing details for debugging.
+        """
+        logger.info(f"[UppercaseAgent] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
         text = env.payload.get("text", "")
         env.payload["text"] = text.upper()
-        env.payload["stage"] = "after_upper"
         env.kind = "result"
-        # Don't modify reply_* - just process and return result to whoever sent this
         logger.info(f"[UppercaseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
+        logger.info(f"[UppercaseAgent] Outgoing: {env}")
         return env
 
 
 class ReverseAgent(BaseAgent):
-    """Example worker: reverses payload['text'] and returns 'result'."""
+    """Example worker: reverses payload['text'] and returns 'result'.
+    
+    Demonstrates basic text transformation agent pattern.
+    Changes envelope kind from 'task' to 'result' after processing.
+    """
+    
     def __init__(self, redis: Redis):
         super().__init__(redis, role="reverse")
 
     async def process(self, env: Envelope) -> Envelope:
-        """Reverse the text."""
+        """Reverse the text.
+        
+        Transforms payload['text'] by reversing character order and marks envelope as 'result'.
+        Logs processing details for debugging.
+        """
         text = env.payload.get("text", "")
         env.payload["text"] = text[::-1]
-        env.payload["stage"] = "after_reverse"
         env.kind = "result"
-        # Don't modify reply_* - just process and return result to whoever sent this
         logger.info(f"[ReverseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
+        logger.info(f"[ReverseAgent] Outgoing: {env}")
         return env
 
 
 class StatsAgent(BaseAgent):
-    """
-    Example 'stat' role agent that only listens to lifecycle broadcasts
-    (no stream consumption). Extend this class to persist metrics.
+    """Monitoring agent that collects lifecycle and heartbeat events.
+    
+    Only subscribes to broadcast channels, doesn't consume from streams.
+    Receives status events from all other agents for observability.
+    Extend this class to persist metrics to time-series databases.
     """
 
     def __init__(self, redis: Redis):
@@ -804,6 +785,11 @@ class StatsAgent(BaseAgent):
         self._t_heartbeat = asyncio.create_task(self._heartbeat_loop())
 
     async def process_data(self, data: dict) -> None:
+        """Process broadcast status messages from other agents.
+        
+        Override this method to implement metrics collection,
+        alerting, or other monitoring functionality.
+        """
         logger.debug(f"StatsAgent received: {data}")
         # Not used in this minimal example.
         return data
@@ -863,15 +849,19 @@ async def send_direct_task(
     conversation_id: str,
     message_id: str,
     payload: Dict[str, Any],
-    reply_role: Optional[str] = None,
-    reply_agent_id: Optional[str] = None,
-    reply_list: Optional[str] = None,
+    result_list: Optional[str] = None,
     role_hint: Optional[str] = None,
 ) -> None:
     """
     Send a direct message to a specific agent.
-      - role_hint (optional) remains in env.target_role as a hint for logging.
-      - Set reply_* to define the next hop.
+    
+    Args:
+        agent_id: Target agent identifier
+        conversation_id: Logical grouping identifier
+        message_id: Unique message identifier
+        payload: Message data
+        result_list: Optional result list for responses
+        role_hint: Optional role hint for logging purposes
     """
     env = Envelope(
         conversation_id=conversation_id,
@@ -883,9 +873,7 @@ async def send_direct_task(
         kind="task",
         payload=payload,
         ts=time.time(),
-        reply_role=reply_role,
-        reply_agent_id=reply_agent_id,
-        reply_list=reply_list,
+        result_list=result_list,
         trace=[],
     )
     await xadd(_redis, agent_stream_key(agent_id), env.to_stream_fields())
@@ -893,26 +881,35 @@ async def send_direct_task(
 # -------------------------- External entry point --------------------------
 
 async def process_request(conversation_id: str, message: str) -> str:
-    """External entry point to process a request."""
+    """External entry point to process a request through the agent pipeline.
+    
+    Creates initial envelope, sends to manager, and waits for final result.
+    Uses Redis list with BRPOP for synchronous result retrieval.
+    
+    Args:
+        conversation_id: Logical grouping identifier for related messages
+        message: Text content to process
+        
+    Returns:
+        Processed text result or error message
+    """
     await start_runtime()
     
     message_id = f"{conversation_id}:{time.time()}"
-    reply_list = f"reply:{message_id}"
+    result_list = f"result:{message_id}"
     
     env = Envelope(
         conversation_id=conversation_id,
         message_id=message_id,
         target_role="manager",
         target_agent_id=None,
+        target_list=None,
         sender_role="external",
         sender_agent_id="process_request",
         kind="task",
         payload={"text": message, "stage": "start"},
         ts=time.time(),
-        reply_role=None,
-        reply_agent_id=None,
-        reply_list=None,
-        result_list=reply_list,
+        result_list=result_list,
         trace=[],
     )
     
@@ -923,16 +920,17 @@ async def process_request(conversation_id: str, message: str) -> str:
     logger.info(f"[process_request] Sent initial task to manager stream for {message_id}")
     
     # Wait for final result
-    logger.info(f"[process_request] Waiting for result on {reply_list}")
-    br = await _redis.brpop(reply_list, timeout=30)
+    logger.info(f"[process_request] Waiting for result on {result_list}")
+    br = await _redis.brpop(result_list, timeout=10)
     result = 'No result'
     if not br:
-        logger.error(f"[process_request] Timeout waiting for result on {reply_list}")
+        logger.error(f"[process_request] Timeout waiting for result on {result_list}")
         result = 'Timeout waiting for final result'
     else:
         _, result_json = br
-        result_env = Envelope.from_json(result_json)
+        result_env = Envelope(**json.loads(result_json.decode('utf-8')))
         logger.info(f"[process_request] Received final result for {message_id}: '{result_env.payload.get('text', 'No result')}'")
+        logger.info(result_env)
         result = result_env.payload.get("text", "No result received")
     return result
 
@@ -943,7 +941,7 @@ if __name__ == "__main__":
         print("Starting unified demo with documentation...")
         try:
             await start_runtime()
-            res = await process_request("conv1", "Hello, world!")
+            res = await process_request("conv1", f"Hello, world! [{datetime.now().isoformat()}]")
             print("RESULT:", res)  # Expected: "!DLROW ,OLLEH"
 
             # Example: broadcast a reload to uppercase agents

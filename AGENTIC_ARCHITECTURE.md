@@ -24,21 +24,43 @@ This document defines the Redis Streams-based architecture for the SMS Platform 
 - Complete trace system for debugging and observability
 - Manager-controlled history cleanup and state management
 
-## SMS Assistant Implementation
+## Current Implementation
 
-### Agent Roles and Sequence
+### Demo Pipeline
 
-**Initial PoC Pipeline:**
+**Current PoC Pipeline:**
 ```
-manager → translate → clarify → search_docs → summarize → quality_control → reply_list
+manager → uppercase → manager → reverse → manager → result_list
 ```
 
-#### Core Agents
+#### Implemented Agents
 ```python
 class ManagerAgent(BaseAgent):
-    """Routes messages through pipeline based on stage"""
+    """Pipeline orchestrator with state machine routing"""
     role = "manager"
     
+class UppercaseAgent(BaseAgent):
+    """Example worker: converts text to uppercase"""
+    role = "uppercase"
+    
+class ReverseAgent(BaseAgent):
+    """Example worker: reverses text character order"""
+    role = "reverse"
+    
+class StatsAgent(BaseAgent):
+    """Monitoring agent for lifecycle events"""
+    role = "stat"
+```
+
+### Future SMS Assistant Agents
+
+**Planned Production Pipeline:**
+```
+manager → translate → clarify → search_docs → summarize → quality_control → result_list
+```
+
+#### Future Core Agents
+```python
 class TranslationAgent(BaseAgent):
     """Detects language and translates to English"""
     role = "translate"
@@ -67,24 +89,33 @@ class QualityControlAgent(BaseAgent):
 class Envelope:
     conversation_id: str              # Conversation correlation key
     message_id: str                   # Unique message identifier
-    role_target: Optional[str]        # Target role for routing
-    agent_target_id: Optional[str]    # Direct agent targeting
+    target_role: Optional[str]        # Target role for routing
+    target_agent_id: Optional[str]    # Direct agent targeting
+    target_list: Optional[str]        # Target Redis list for external responses
     
-    role_sender: str                  # Sender role
-    agent_sender_id: str              # Sender agent ID
+    sender_role: str                  # Sender role
+    sender_agent_id: str              # Sender agent ID
     
     kind: str                         # "task" | "result" | "control" | "status"
     payload: Dict[str, Any]           # All conversation data and results
     ts: float                         # Timestamp
     
-    reply_role: Optional[str]         # Next pipeline stage
-    reply_agent_id: Optional[str]     # Direct next hop
-    reply_list: Optional[str]         # Final response destination
-    
+    result_list: str                  # Final response destination list
     trace: List[Dict[str, Any]]       # Complete execution audit trail
 ```
 
-### Payload Schema for SMS Assistant
+### Current Demo Payload Schema
+
+```python
+payload = {
+    "text": "Hello, world!",           # Text being processed
+    "stage": "start",                 # Pipeline stage marker
+    "errors": [],                     # Accumulated errors
+    "__agent_timeout_sec": 30.0       # Per-message timeout override
+}
+```
+
+### Future SMS Assistant Payload Schema
 
 ```python
 payload = {
@@ -149,42 +180,43 @@ broadcast:all                # System-wide commands
 broadcast:role:stat          # Lifecycle events
 broadcast:role:{role}        # Role-specific commands
 
-# Reply lists
-reply:{message_id}           # External response delivery
+# Result lists
+result:{message_id}          # External response delivery
 ```
 
 ### Message Flow Example
 ```python
 # 1. External request
-await process_request("conv_123", "¿Cómo configurar SMS?")
+await process_request("conv_123", "Hello, world!")
 
 # 2. Initial envelope to manager
 XADD "stream:role:manager" {
     "envelope": json({
         "conversation_id": "conv_123",
         "message_id": "conv_123:1726339057.123",
-        "role_target": "manager",
-        "payload": {"user_query": "¿Cómo configurar SMS?", "stage": "start"}
+        "target_role": "manager",
+        "sender_role": "external",
+        "kind": "task",
+        "payload": {"text": "Hello, world!", "stage": "start"},
+        "result_list": "result:conv_123:1726339057.123"
     })
 }
 
-# 3. Manager routes to translate
-XADD "stream:role:translate" {
-    "envelope": json({...payload: {"stage": "after_start"}...})
+# 3. Manager routes to uppercase
+XADD "stream:role:uppercase" {
+    "envelope": json({...payload: {"stage": "upper"}...})
 }
 
-# 4. Translation agent processes and routes to clarify
-XADD "stream:role:clarify" {
-    "envelope": json({
-        ...payload: {
-            "translation": {"detected_language": "spanish", ...},
-            "stage": "after_translate"
-        }...
-    })
+# 4. Uppercase agent processes and returns to manager
+# BaseAgent automatically sets target_role = env.sender_role ("manager")
+
+# 5. Manager routes to reverse
+XADD "stream:role:reverse" {
+    "envelope": json({...payload: {"stage": "reverse"}...})
 }
 
-# 5. Final response delivery
-LPUSH "reply:conv_123:1726339057.123" json({final_envelope})
+# 6. Final response delivery to Redis list
+LPUSH "result:conv_123:1726339057.123" json({final_envelope})
 ```
 
 ## Integration with Existing Infrastructure
@@ -237,7 +269,7 @@ class SearchAgent(BaseAgent):
 ### Telegram Bot Integration
 ```python
 # Direct integration in tg.py
-from unified_agents import process_request
+from agent import process_request
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
@@ -285,6 +317,16 @@ if len(env.payload["messages"]) > MAX_HISTORY:
 
 ## Reliability and Error Handling
 
+### Automatic Return Routing
+```python
+# BaseAgent automatically routes responses back to sender
+env.target_role = env.sender_role  # Send back to sender by default
+env.target_agent_id = None
+env.target_list = None
+
+# Agents can override this behavior in their process() method
+```
+
 ### Safety Timeouts
 ```python
 # Default and per-message timeouts
@@ -293,15 +335,23 @@ timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
 env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
 ```
 
-### Error Accumulation
+### Error Accumulation and Trace System
 ```python
-# Errors added to payload and routed normally
+# Execution trace with timing and error information
+trace_item = {
+    'start_ts': time.time(),
+    'role': self.role,
+    'agent_id': self.agent_id,
+    'end_ts': time.time(),
+    'duration': duration,
+    'exception': exception_info  # If error occurred
+}
+env.trace.append(trace_item)
+
+# Errors added to payload for manager routing decisions
 env.payload.setdefault("errors", []).append({
-    "code": "timeout",
-    "message": "Task exceeded safety timeout",
-    "agent": self.agent_id,
-    "role": self.role,
-    "timestamp": time.time()
+    "code": "manager.stage",
+    "message": f"Unknown stage '{stage}' for kind '{env.kind}'"
 })
 ```
 
@@ -319,16 +369,18 @@ else:
 
 ### Complete Trace System
 ```python
-# Each agent adds trace entry
-env.trace.append({
-    "agent": self.agent_id,
-    "role": self.role,
-    "ts": time.time(),
-    "note": "start-task",
-    "duration_ms": 0
-})
+# Each agent adds detailed trace entry with timing
+trace_item = {
+    'start_ts': time.time(),
+    'role': self.role,
+    'agent_id': self.agent_id,
+    'end_ts': time.time(),
+    'duration': end_ts - start_ts,
+    'exception': exception_info  # If error occurred
+}
+env.trace.append(trace_item)
 
-# Final envelope contains complete pipeline execution history
+# Final envelope contains complete pipeline execution history with precise timing
 ```
 
 ### Lifecycle Monitoring
@@ -367,19 +419,27 @@ class NewFeatureAgent(BaseAgent):
 ### Testing Strategy
 ```python
 # Unit test individual agents
-async def test_translation_agent():
+async def test_uppercase_agent():
     env = Envelope(
         conversation_id="test",
         message_id="test_1",
-        payload={"user_query": "Hola mundo"},
-        # ... other required fields
+        target_role="uppercase",
+        target_agent_id=None,
+        target_list=None,
+        sender_role="external",
+        sender_agent_id="test",
+        kind="task",
+        payload={"text": "hello world", "stage": "upper"},
+        ts=time.time(),
+        result_list="result:test_1",
+        trace=[]
     )
     
-    agent = TranslationAgent(mock_redis)
+    agent = UppercaseAgent(mock_redis)
     result = await agent.process(env)
     
-    assert "translation" in result.payload
-    assert result.payload["translation"]["detected_language"] == "spanish"
+    assert result.payload["text"] == "HELLO WORLD"
+    assert result.kind == "result"
 ```
 
 ## Future Extensions
