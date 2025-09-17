@@ -679,102 +679,6 @@ class BaseAgent:
 
 # -------------------------- Concrete agents --------------------------
 
-class ManagerAgent(BaseAgent):
-    """Pipeline orchestrator that routes messages through processing stages.
-    
-    Implements a simple state machine:
-    - start -> uppercase -> reverse -> final result
-    
-    Includes run counter for demo purposes with safety limit.
-    """
-    
-    async def process(self, env: Envelope) -> Envelope:
-        """Route messages through the pipeline stages.
-        
-        State machine logic:
-        1. task + start -> route to uppercase
-        2. result + upper -> route to reverse  
-        3. result + reverse -> send to result_list for external caller
-        
-        Returns modified envelope with updated routing information.
-        """
-        stage = env.payload.get("stage", "start")
-        logger.info(f"[ManagerAgent] Processing {env.kind} at stage '{stage}' for {env.message_id}")
-        logger.info(f"[ManagerAgent] Incoming: {env}")
-
-        if env.kind == "task" and stage == "start":
-            env.target_role = "uppercase"
-            env.payload["stage"] = "upper"
-            logger.info(f"[ManagerAgent] Sending task to uppercase")
-            return env
-        
-        if env.kind == "result" and stage == "upper":
-            env.kind = "task"
-            env.target_role = "reverse"
-            env.payload["stage"] = "reverse"
-            logger.info(f"[ManagerAgent] Sending task to reverse")
-            return env
-        
-        if env.kind == "result" and stage == "reverse":
-            logger.info(f"[ManagerAgent] Final result ready: {env}")
-            if env.result_list:
-                env.target_list = env.result_list
-                env.target_role = None
-                env.target_agent_id = None
-            return env
-        
-        # Unknown stage
-        logger.error(f"[ManagerAgent] Unknown stage '{stage}' for {env}")
-        env.payload.setdefault("errors", []).append({
-            "code": "manager.stage",
-            "message": f"Unknown stage '{stage}' for kind '{env.kind}'",
-        })
-        return env
-
-
-class UppercaseAgent(BaseAgent):
-    """Example worker: converts payload['text'] to uppercase and returns 'result'.
-    
-    Demonstrates basic text transformation agent pattern.
-    Changes envelope kind from 'task' to 'result' after processing.
-    """
-    
-    async def process(self, env: Envelope) -> Envelope:
-        """Convert text to uppercase.
-        
-        Transforms payload['text'] to uppercase and marks envelope as 'result'.
-        Logs processing details for debugging.
-        """
-        logger.info(f"[UppercaseAgent] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
-        text = env.payload.get("text", "")
-        env.payload["text"] = text.upper()
-        env.kind = "result"
-        logger.info(f"[UppercaseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
-        logger.info(f"[UppercaseAgent] Outgoing: {env}")
-        return env
-
-
-class ReverseAgent(BaseAgent):
-    """Example worker: reverses payload['text'] and returns 'result'.
-    
-    Demonstrates basic text transformation agent pattern.
-    Changes envelope kind from 'task' to 'result' after processing.
-    """
-
-    async def process(self, env: Envelope) -> Envelope:
-        """Reverse the text.
-        
-        Transforms payload['text'] by reversing character order and marks envelope as 'result'.
-        Logs processing details for debugging.
-        """
-        text = env.payload.get("text", "")
-        env.payload["text"] = text[::-1]
-        env.kind = "result"
-        logger.info(f"[ReverseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
-        logger.info(f"[ReverseAgent] Outgoing: {env}")
-        return env
-
-
 class StatsAgent(BaseAgent):
     """Monitoring agent that collects lifecycle and heartbeat events.
     
@@ -975,9 +879,6 @@ def get_registered_agents() -> List[BaseAgent]:
     return _agent_registry.copy()
 
 # Create default agent instances - they will auto-register via BaseAgent.__init__
-_manager = ManagerAgent()
-_upper = UppercaseAgent()
-_reverse = ReverseAgent()
 _stats = StatsAgent()
 
 async def start_runtime() -> None:
@@ -1118,21 +1019,4 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
 # -------------------------- Local demo --------------------------
 
 if __name__ == "__main__":
-    async def _demo():
-        print("Starting unified demo with documentation...")
-        try:
-            await start_runtime()
-            payload = {"text": f"Hello, world! [{datetime.now().isoformat()}]", "stage": "start"}
-            res = await process_request("manager", "conv1", payload)
-            print("RESULT:", res)  # Expected: "!DLROW ,OLLEH"
-
-            # Example: broadcast a reload to uppercase agents
-            await broadcast_command("reload", role="uppercase")
-
-            # Example: global graceful shutdown (agents finish current tasks)
-            await broadcast_command("shutdown")
-        finally:
-            #await stop_runtime()
-            pass
-
-    asyncio.run(_demo())
+    pass
