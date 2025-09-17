@@ -286,6 +286,25 @@ def build_agent_id() -> str:
     """AGENT_ID = {HOSTNAME}:{PID}:{COUNTER}."""
     return f"{get_hostname()}:{get_pid()}:{get_next_counter()}"
 
+def derive_role_from_class_name(class_name: str) -> str:
+    """Derive agent role from class name.
+    
+    Removes 'Agent' suffix and converts to lowercase.
+    Examples:
+    - 'ManagerAgent' -> 'manager'
+    - 'TranslationAgent' -> 'translation'
+    - 'ClarificationAgent' -> 'clarification'
+    - 'StatsAgent' -> 'stats'
+    
+    This ensures perfect consistency between class names and roles,
+    eliminating the possibility of typos or mismatched role names.
+    """
+    if class_name.endswith('Agent'):
+        role = class_name[:-5]  # Remove 'Agent' suffix
+    else:
+        role = class_name
+    return role.lower()
+
 # -------------------------- Envelope --------------------------
 
 @dataclass
@@ -381,12 +400,10 @@ class BaseAgent:
 
     def __init__(
         self,
-        redis: Redis,
-        role: str,
         task_timeout_sec: float = DEFAULT_TASK_TIMEOUT_SEC,
     ) -> None:
-        self.redis = redis
-        self.role = role
+        self.redis = get_redis()
+        self.role = derive_role_from_class_name(self.__class__.__name__)
         self.agent_id = build_agent_id()
         self.task_timeout_sec = task_timeout_sec
 
@@ -407,6 +424,9 @@ class BaseAgent:
         self._t_direct: Optional[asyncio.Task] = None
         self._t_broadcast: Optional[asyncio.Task] = None
         self._t_heartbeat: Optional[asyncio.Task] = None
+        
+        # Auto-register this agent in the global registry
+        _register_agent(self)
 
     # ---- lifecycle ----
 
@@ -666,10 +686,6 @@ class ManagerAgent(BaseAgent):
     Includes run counter for demo purposes with safety limit.
     """
     
-    def __init__(self, redis: Redis):
-        super().__init__(redis, role="manager")
-        self.run_counter = 0
-
     async def process(self, env: Envelope) -> Envelope:
         """Route messages through the pipeline stages.
         
@@ -684,11 +700,6 @@ class ManagerAgent(BaseAgent):
         logger.info(f"[ManagerAgent] Processing {env.kind} at stage '{stage}' for {env.message_id}")
         logger.info(f"[ManagerAgent] Incoming: {env}")
 
-        self.run_counter += 1
-        logger.info(f"[ManagerAgent] Run counter: {self.run_counter}")
-        if self.run_counter > 10:
-            raise Exception("Too many runs")
-        
         if env.kind == "task" and stage == "start":
             env.target_role = "uppercase"
             env.payload["stage"] = "upper"
@@ -726,8 +737,6 @@ class UppercaseAgent(BaseAgent):
     Changes envelope kind from 'task' to 'result' after processing.
     """
     
-    def __init__(self, redis: Redis):
-        super().__init__(redis, role="uppercase")
 
     async def process(self, env: Envelope) -> Envelope:
         """Convert text to uppercase.
@@ -751,8 +760,6 @@ class ReverseAgent(BaseAgent):
     Changes envelope kind from 'task' to 'result' after processing.
     """
     
-    def __init__(self, redis: Redis):
-        super().__init__(redis, role="reverse")
 
     async def process(self, env: Envelope) -> Envelope:
         """Reverse the text.
@@ -776,8 +783,6 @@ class StatsAgent(BaseAgent):
     Extend this class to persist metrics to time-series databases.
     """
 
-    def __init__(self, redis: Redis):
-        super().__init__(redis, role=STATUS_ROLE)
 
     async def start(self) -> None:
         await self._publish_status("init")
@@ -794,40 +799,79 @@ class StatsAgent(BaseAgent):
         # Not used in this minimal example.
         return data
 
-# -------------------------- Global runtime (no orchestrator class) --------------------------
 
 _redis: Redis = Redis.from_url(REDIS_URL, decode_responses=False)
 
-_manager = ManagerAgent(_redis)
-_upper = UppercaseAgent(_redis)
-_reverse = ReverseAgent(_redis)
-_stats = StatsAgent(_redis)
+def get_redis() -> Redis:
+    """Get the global Redis connection instance.
+    
+    This provides a centralized Redis connection that all agents can use,
+    eliminating the need to pass Redis connections as constructor arguments.
+    """
+    return _redis
 
-_started = False
+# Dynamic agent registry
+_agent_registry: List[BaseAgent] = []
+_runtime_started = False
+
+def _register_agent(agent: BaseAgent) -> None:
+    """Register an agent in the global registry.
+    
+    If runtime is already started, automatically start the agent.
+    This enables dynamic agent creation after system initialization.
+    """
+    global _agent_registry, _runtime_started
+    
+    _agent_registry.append(agent)
+    logger.info(f"Registered {agent.role} agent {agent.agent_id} in registry")
+    
+    # If runtime is already started, start this agent immediately
+    if _runtime_started:
+        logger.info(f"Runtime already started, auto-starting {agent.role} agent {agent.agent_id}")
+        # We need to schedule this as a task since we can't await in a sync function
+        asyncio.create_task(agent.start())
+
+def get_registered_agents() -> List[BaseAgent]:
+    """Get a copy of the current agent registry."""
+    return _agent_registry.copy()
+
+# Create default agent instances - they will auto-register via BaseAgent.__init__
+_manager = ManagerAgent()
+_upper = UppercaseAgent()
+_reverse = ReverseAgent()
+_stats = StatsAgent()
 
 async def start_runtime() -> None:
     """
-    Start all agents exactly once (idempotent).
+    Start all registered agents exactly once (idempotent).
     Call this during application boot, or let process_request() call it lazily.
     """
-    global _started
-    if _started:
+    global _runtime_started
+    if _runtime_started:
         return
-    await _manager.start()
-    await _upper.start()
-    await _reverse.start()
-    await _stats.start()
-    _started = True
+    
+    logger.info(f"Starting runtime with {len(_agent_registry)} registered agents")
+    for agent in _agent_registry:
+        logger.info(f"Starting {agent.role} agent {agent.agent_id}")
+        await agent.start()
+    
+    _runtime_started = True
+    logger.info("Runtime started successfully")
 
 async def stop_runtime() -> None:
-    """Graceful shutdown of all agents and Redis connection."""
-    global _started
-    if not _started:
+    """Graceful shutdown of all registered agents and Redis connection."""
+    global _runtime_started
+    if not _runtime_started:
         return
-    for a in (_manager, _upper, _reverse, _stats):
-        await a.stop()
+    
+    logger.info(f"Stopping runtime with {len(_agent_registry)} registered agents")
+    for agent in _agent_registry:
+        logger.info(f"Stopping {agent.role} agent {agent.agent_id}")
+        await agent.stop()
+    
     await _redis.aclose()
-    _started = False
+    _runtime_started = False
+    logger.info("Runtime stopped successfully")
 
 # -------------------------- Broadcast helpers --------------------------
 
