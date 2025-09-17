@@ -842,45 +842,8 @@ async def broadcast_command(cmd: str, role: Optional[str] = None, **kwargs: Any)
     channel = role_broadcast_channel(role) if role else BROADCAST_ALL
     await _redis.publish(channel, json.dumps(payload, ensure_ascii=False))
 
-# -------------------------- Direct messaging helper (optional) --------------------------
 
-async def send_direct_task(
-    agent_id: str,
-    conversation_id: str,
-    message_id: str,
-    payload: Dict[str, Any],
-    result_list: Optional[str] = None,
-    role_hint: Optional[str] = None,
-) -> None:
-    """
-    Send a direct message to a specific agent.
-    
-    Args:
-        agent_id: Target agent identifier
-        conversation_id: Logical grouping identifier
-        message_id: Unique message identifier
-        payload: Message data
-        result_list: Optional result list for responses
-        role_hint: Optional role hint for logging purposes
-    """
-    env = Envelope(
-        conversation_id=conversation_id,
-        message_id=message_id,
-        target_role=role_hint,
-        target_agent_id=agent_id,
-        sender_role="external",
-        sender_agent_id="send_to_agent",
-        kind="task",
-        payload=payload,
-        ts=time.time(),
-        result_list=result_list,
-        trace=[],
-    )
-    await xadd(_redis, agent_stream_key(agent_id), env.to_stream_fields())
-
-# -------------------------- External entry point --------------------------
-
-async def process_request(conversation_id: str, message: str) -> str:
+async def process_request(role: str, conversation_id: str, payload: dict) -> str:
     """External entry point to process a request through the agent pipeline.
     
     Creates initial envelope, sends to manager, and waits for final result.
@@ -901,19 +864,19 @@ async def process_request(conversation_id: str, message: str) -> str:
     env = Envelope(
         conversation_id=conversation_id,
         message_id=message_id,
-        target_role="manager",
+        target_role=role,
         target_agent_id=None,
         target_list=None,
         sender_role="external",
         sender_agent_id="process_request",
         kind="task",
-        payload={"text": message, "stage": "start"},
+        payload=payload,
         ts=time.time(),
         result_list=result_list,
         trace=[],
     )
     
-    logger.info(f"[process_request] Starting request {message_id} with text: '{message}'")
+    logger.info(f"[process_request] Starting request {message_id}")
     
     # Send initial task to manager
     await xadd(_redis, role_stream_key("manager"), env.to_stream_fields())
@@ -941,7 +904,8 @@ if __name__ == "__main__":
         print("Starting unified demo with documentation...")
         try:
             await start_runtime()
-            res = await process_request("conv1", f"Hello, world! [{datetime.now().isoformat()}]")
+            payload = {"text": f"Hello, world! [{datetime.now().isoformat()}]", "stage": "start"}
+            res = await process_request("manager", "conv1", payload)
             print("RESULT:", res)  # Expected: "!DLROW ,OLLEH"
 
             # Example: broadcast a reload to uppercase agents

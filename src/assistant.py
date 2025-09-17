@@ -6,6 +6,8 @@ import agent
 
 logger = logging.getLogger(__name__)
 
+
+
 class AlarisAssistant:
     def __init__(self):
         self.conversations = {}  # In-memory conversation storage
@@ -13,7 +15,8 @@ class AlarisAssistant:
     async def process_message(self, user_id: str, message: str) -> Dict[str, Any]:
         logger.info(f"Processing message from user {user_id}: {message}")
         response = dict()
-        response["message"] = await agent.process_request(user_id, message)
+        payload = {"text": message, "stage": "start"}
+        response["message"] = await agent.process_request('manager', user_id, payload)
         return response
    
     async def clear_conversation_history(self, user_id: str) -> bool:
