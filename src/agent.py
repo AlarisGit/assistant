@@ -225,8 +225,10 @@ D) Adding a new worker:
 """
 
 import asyncio
+import atexit
 import json
 import os
+import signal
 import socket
 import time
 from dataclasses import dataclass, asdict, replace
@@ -737,7 +739,6 @@ class UppercaseAgent(BaseAgent):
     Changes envelope kind from 'task' to 'result' after processing.
     """
     
-
     async def process(self, env: Envelope) -> Envelope:
         """Convert text to uppercase.
         
@@ -759,7 +760,6 @@ class ReverseAgent(BaseAgent):
     Demonstrates basic text transformation agent pattern.
     Changes envelope kind from 'task' to 'result' after processing.
     """
-    
 
     async def process(self, env: Envelope) -> Envelope:
         """Reverse the text.
@@ -810,9 +810,148 @@ def get_redis() -> Redis:
     """
     return _redis
 
+# -------------------------- Automatic Cleanup System --------------------------
+
+def _cleanup_on_exit() -> None:
+    """Emergency cleanup function called on process exit.
+    
+    This ensures agents are gracefully stopped even if stop_runtime() 
+    is not called explicitly. Handles interpreter shutdown gracefully.
+    """
+    global _runtime_started
+    
+    if not _runtime_started:
+        return
+        
+    logger.info("Process exiting - performing automatic agent cleanup")
+    
+    # During interpreter shutdown, asyncio is often unavailable
+    # Go directly to synchronous cleanup which is more reliable
+    try:
+        # Try to check if we can still use asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+        
+        # Only try async cleanup if loop is available and not shutting down
+        if not loop.is_running():
+            # Try a quick async cleanup with very short timeout
+            try:
+                asyncio.run(_emergency_stop_runtime())
+                return
+            except Exception as e:
+                logger.warning(f"Async cleanup failed during shutdown: {e}")
+        else:
+            # Loop is running but we're in atexit - likely shutting down
+            logger.info("Event loop running during atexit - using sync cleanup")
+            
+    except (RuntimeError, AttributeError) as e:
+        logger.info(f"Asyncio unavailable during shutdown ({e}) - using sync cleanup")
+    
+    # Fall back to synchronous cleanup (most reliable during shutdown)
+    _sync_cleanup()
+
+async def _emergency_stop_runtime() -> None:
+    """Emergency async version of stop_runtime for cleanup."""
+    global _runtime_started
+    
+    if not _runtime_started:
+        return
+    
+    logger.info(f"Emergency stopping runtime with {len(_agent_registry)} registered agents")
+    
+    # Stop all agents with shorter timeout for emergency cleanup
+    for agent in _agent_registry:
+        try:
+            logger.info(f"Emergency stopping {agent.role} agent {agent.agent_id}")
+            await asyncio.wait_for(agent.stop(), timeout=2.0)  # Shorter timeout
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout stopping {agent.role} agent {agent.agent_id}")
+        except Exception as e:
+            logger.error(f"Error stopping {agent.role} agent {agent.agent_id}: {e}")
+    
+    # Close Redis connection
+    try:
+        await asyncio.wait_for(_redis.aclose(), timeout=1.0)
+    except Exception as e:
+        logger.error(f"Error closing Redis connection: {e}")
+    
+    _runtime_started = False
+    logger.info("Emergency runtime cleanup completed")
+
+def _sync_cleanup() -> None:
+    """Synchronous cleanup for interpreter shutdown scenarios."""
+    global _runtime_started
+    
+    logger.info("Performing synchronous cleanup")
+    
+    # Set shutdown flags on all agents (safe during interpreter shutdown)
+    for agent in _agent_registry:
+        try:
+            # Set shutdown flags without using asyncio
+            agent._shutdown_requested = True
+            
+            # Try to set the stop event if it exists and is accessible
+            if hasattr(agent, '_stop') and agent._stop is not None:
+                try:
+                    agent._stop.set()
+                except Exception:
+                    # Event might be from a closed loop, ignore
+                    pass
+            
+            logger.info(f"Set shutdown flag for {agent.role} agent {agent.agent_id}")
+        except Exception as e:
+            # During interpreter shutdown, some operations may fail - that's OK
+            logger.debug(f"Minor error setting shutdown flag for {agent.role} agent: {e}")
+    
+    # Try to close Redis connection synchronously if possible
+    try:
+        # Don't try to close Redis during interpreter shutdown as it may hang
+        # The OS will clean up the connection anyway
+        logger.info("Skipping Redis cleanup during interpreter shutdown (OS will handle)")
+    except Exception as e:
+        logger.debug(f"Redis cleanup skipped: {e}")
+    
+    _runtime_started = False
+    logger.info("Synchronous cleanup completed successfully")
+
+def _signal_handler(signum, frame) -> None:
+    """Handle SIGTERM and SIGINT for graceful shutdown."""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown")
+    
+    # Set the shutdown event to interrupt any waiting operations
+    try:
+        # Try to set the shutdown event if event loop exists
+        loop = asyncio.get_event_loop()
+        if not loop.is_closed():
+            # Schedule setting the event in the event loop
+            if _shutdown_event is not None:
+                loop.call_soon_threadsafe(_shutdown_event.set)
+    except RuntimeError:
+        # No event loop, that's OK - cleanup will handle it
+        pass
+    
+    # Perform cleanup
+    _cleanup_on_exit()
+    
+# Register cleanup handlers
+atexit.register(_cleanup_on_exit)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
+
+logger.info("Automatic cleanup system initialized")
+
 # Dynamic agent registry
 _agent_registry: List[BaseAgent] = []
 _runtime_started = False
+_shutdown_event: Optional[asyncio.Event] = None  # Global shutdown signal
+
+def _get_shutdown_event() -> asyncio.Event:
+    """Get or create the global shutdown event."""
+    global _shutdown_event
+    if _shutdown_event is None:
+        _shutdown_event = asyncio.Event()
+    return _shutdown_event
 
 def _register_agent(agent: BaseAgent) -> None:
     """Register an agent in the global registry.
@@ -926,19 +1065,54 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     await xadd(_redis, role_stream_key("manager"), env.to_stream_fields())
     logger.info(f"[process_request] Sent initial task to manager stream for {message_id}")
     
-    # Wait for final result
+    # Wait for final result with shutdown awareness
     logger.info(f"[process_request] Waiting for result on {result_list}")
-    br = await _redis.brpop(result_list, timeout=10)
-    result = 'No result'
-    if not br:
-        logger.error(f"[process_request] Timeout waiting for result on {result_list}")
-        result = 'Timeout waiting for final result'
-    else:
-        _, result_json = br
-        result_env = Envelope(**json.loads(result_json.decode('utf-8')))
-        logger.info(f"[process_request] Received final result for {message_id}: '{result_env.payload.get('text', 'No result')}'")
-        logger.info(result_env)
-        result = result_env.payload.get("text", "No result received")
+    
+    try:
+        # Create tasks for both result waiting and shutdown detection
+        result_task = asyncio.create_task(_redis.brpop(result_list, timeout=10))
+        shutdown_event = _get_shutdown_event()
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        
+        # Wait for either result or shutdown signal
+        done, pending = await asyncio.wait(
+            [result_task, shutdown_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Cancel any pending tasks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # Check which task completed
+        if shutdown_task in done:
+            logger.info(f"[process_request] Shutdown signal received, cancelling wait for {message_id}")
+            return "Request cancelled due to shutdown"
+        
+        # Get the result from the completed result task
+        br = result_task.result()
+        
+        if not br:
+            logger.error(f"[process_request] Timeout waiting for result on {result_list}")
+            result = 'Timeout waiting for final result'
+        else:
+            _, result_json = br
+            result_env = Envelope(**json.loads(result_json.decode('utf-8')))
+            logger.info(f"[process_request] Received final result for {message_id}: '{result_env.payload.get('text', 'No result')}'")
+            logger.info(result_env)
+            result = result_env.payload.get("text", "No result received")
+            
+    except asyncio.CancelledError:
+        logger.info(f"[process_request] Request {message_id} cancelled")
+        result = "Request cancelled"
+    except Exception as e:
+        logger.error(f"[process_request] Error waiting for result: {e}")
+        result = f"Error: {e}"
+        
     return result
 
 # -------------------------- Local demo --------------------------
@@ -958,6 +1132,7 @@ if __name__ == "__main__":
             # Example: global graceful shutdown (agents finish current tasks)
             await broadcast_command("shutdown")
         finally:
-            await stop_runtime()
+            #await stop_runtime()
+            pass
 
     asyncio.run(_demo())
