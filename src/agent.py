@@ -275,6 +275,19 @@ STATUS_ROLE = "stat"  # lifecycle/heartbeat broadcast role
 HEARTBEAT_INTERVAL_SEC = 5.0
 DEFAULT_TASK_TIMEOUT_SEC = 60.0  # safety timeout per agent (can be overridden per-envelope)
 
+# -------------------------- Safety Limits (Circuit Breaker) --------------------------
+
+# Maximum number of processing steps before circuit breaker trips
+MAX_PROCESS_COUNT = 50
+
+# Maximum total processing time in seconds before circuit breaker trips
+# This is cumulative time spent in agent.process() methods (sum of trace item durations)
+MAX_TOTAL_PROCESSING_TIME = 300.0  # 5 minutes
+
+# Maximum age of envelope in seconds before circuit breaker trips
+# This is time since envelope creation (create_ts), not individual processing step time
+MAX_ENVELOPE_AGE = 600.0  # 10 minutes
+
 # -------------------------- Utilities (host, pid, counters) --------------------------
 
 _instance_counter = 0
@@ -345,7 +358,12 @@ class Envelope:
 
     result_list: str
 
-    trace: List[Dict[str, Any]]
+    trace: List[Dict[str, Any]]  # Individual processing step records with start_ts/end_ts/duration
+    
+    # Safety/Circuit Breaker attributes
+    process_count: int = 0  # Number of times this envelope has been processed by agents
+    total_processing_time: float = 0.0  # Cumulative time spent in agent.process() methods (sum of trace durations)
+    create_ts: float = 0.0  # Envelope creation timestamp (for measuring overall envelope age, not individual steps)
 
     def to_stream_fields(self) -> Dict[str, str]:
         """Serialize to field/value pairs for XADD."""
@@ -359,6 +377,71 @@ class Envelope:
     
     def __str__(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
+
+# -------------------------- Safety Functions --------------------------
+
+def check_safety_limits(env: Envelope) -> Optional[str]:
+    """Check if envelope violates any safety limits.
+    
+    Checks three distinct safety metrics:
+    1. Process count: Number of processing steps (prevents infinite loops)
+    2. Total processing time: Cumulative time spent in agent.process() methods
+    3. Envelope age: Time since envelope creation (prevents stale message processing)
+    
+    Note: Envelope age (create_ts) is different from individual step timing (trace items).
+    Envelope age measures overall lifetime, while trace items measure individual processing steps.
+    
+    Returns:
+        None if safe to continue
+        Error message string if safety limit violated
+    """
+    current_time = time.time()
+    
+    # Check process count limit (prevents infinite loops)
+    if env.process_count >= MAX_PROCESS_COUNT:
+        return f"Process count limit exceeded: {env.process_count} >= {MAX_PROCESS_COUNT}"
+    
+    # Check total processing time limit (cumulative time across all processing steps)
+    if env.total_processing_time >= MAX_TOTAL_PROCESSING_TIME:
+        return f"Total processing time limit exceeded: {env.total_processing_time:.2f}s >= {MAX_TOTAL_PROCESSING_TIME}s"
+    
+    # Check envelope age limit (time since envelope creation, not individual step time)
+    if env.create_ts > 0:  # Only check if create_ts was set
+        envelope_age = current_time - env.create_ts
+        if envelope_age >= MAX_ENVELOPE_AGE:
+            return f"Envelope age limit exceeded: {envelope_age:.2f}s >= {MAX_ENVELOPE_AGE}s"
+    
+    return None
+
+def create_safety_error(env: Envelope, error_message: str, agent_role: str, agent_id: str) -> Envelope:
+    """Create an error envelope for safety limit violations.
+    
+    Adds error to payload and trace, marks as result for return to caller.
+    """
+    # Add error to payload
+    env.payload.setdefault("errors", []).append({
+        "code": "safety.limit_exceeded",
+        "message": error_message,
+        "agent_role": agent_role,
+        "agent_id": agent_id,
+        "timestamp": time.time()
+    })
+    
+    # Add error trace entry
+    env.trace.append({
+        "start_ts": time.time(),
+        "role": agent_role,
+        "agent_id": agent_id,
+        "end_ts": time.time(),
+        "duration": 0.0,
+        "error": error_message,
+        "safety_violation": True
+    })
+    
+    # Mark as result to return to caller
+    env.kind = "result"
+    
+    return env
 
 # -------------------------- Redis helpers --------------------------
 
@@ -584,17 +667,36 @@ class BaseAgent:
         Automatically sets up return routing to sender by default.
         Agents can override this behavior in their process() method.
         Adds execution trace with timing and error information.
+        Includes safety checks to prevent resource exhaustion.
         """
         if env.kind == "control":
             return
 
         if env.kind in ("task", "result"):
+            # Check safety limits before processing
+            safety_error = check_safety_limits(env)
+            if safety_error:
+                logger.warning(f"[{self.role}:{self.agent_id}] Safety limit violated: {safety_error}")
+                error_env = create_safety_error(env, safety_error, self.role, self.agent_id)
+                
+                # Send error back to result_list if specified, otherwise drop
+                if error_env.result_list:
+                    logger.info(f"[{self.role}:{self.agent_id}] Sending safety error to result_list: {error_env.result_list}")
+                    await self._send_to_result_list(error_env)
+                else:
+                    logger.info(f"[{self.role}:{self.agent_id}] Dropping envelope due to safety violation (no result_list)")
+                return
+            
             # All agents should set busy flag for proper load balancing
             self._busy.set()
             logger.info(f"Incoming: {env}")
+            
+            # Increment process count
+            env.process_count += 1
 
             trace_item = {}
-            trace_item['start_ts'] = time.time()
+            process_start_time = time.time()
+            trace_item['start_ts'] = process_start_time
             trace_item['role'] = self.role
             trace_item['agent_id'] = self.agent_id
 
@@ -625,6 +727,10 @@ class BaseAgent:
                 
             trace_item['end_ts'] = time.time()
             trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
+            
+            # Update total processing time
+            env.total_processing_time += trace_item['duration']
+            
             if exception:
                 trace_item['exception'] = exception
             
@@ -636,6 +742,14 @@ class BaseAgent:
 
             await self._publish_status("idle")
             self._busy.clear()
+    
+    async def _send_to_result_list(self, env: Envelope) -> None:
+        """Send envelope directly to result_list for safety violations."""
+        if env.result_list:
+            env.sender_role = self.role
+            env.sender_agent_id = self.agent_id
+            env.ts = time.time()
+            await self.redis.lpush(env.result_list, json.dumps(asdict(env), ensure_ascii=False))
 
     async def _send(self, env: Envelope) -> None:
         """Send envelope to target destination.
@@ -729,28 +843,32 @@ def _cleanup_on_exit() -> None:
         
     logger.info("Process exiting - performing automatic agent cleanup")
     
-    # During interpreter shutdown, asyncio is often unavailable
-    # Go directly to synchronous cleanup which is more reliable
+    # During normal program termination, asyncio is often unavailable
+    # This is expected behavior, not an error - use sync cleanup
     try:
-        # Try to check if we can still use asyncio
         loop = asyncio.get_event_loop()
         if loop.is_closed():
-            raise RuntimeError("Event loop is closed")
+            # Event loop closed - normal during shutdown
+            logger.debug("Event loop closed during shutdown - using sync cleanup")
+            _sync_cleanup()
+            return
         
         # Only try async cleanup if loop is available and not shutting down
         if not loop.is_running():
             # Try a quick async cleanup with very short timeout
             try:
                 asyncio.run(_emergency_stop_runtime())
+                logger.info("Async cleanup completed successfully")
                 return
             except Exception as e:
-                logger.warning(f"Async cleanup failed during shutdown: {e}")
+                logger.debug(f"Async cleanup failed during shutdown: {e} - using sync cleanup")
         else:
             # Loop is running but we're in atexit - likely shutting down
-            logger.info("Event loop running during atexit - using sync cleanup")
+            logger.debug("Event loop running during atexit - using sync cleanup")
             
-    except (RuntimeError, AttributeError) as e:
-        logger.info(f"Asyncio unavailable during shutdown ({e}) - using sync cleanup")
+    except (RuntimeError, AttributeError):
+        # No event loop available - normal during interpreter shutdown
+        logger.debug("No event loop available during shutdown - using sync cleanup")
     
     # Fall back to synchronous cleanup (most reliable during shutdown)
     _sync_cleanup()
@@ -784,10 +902,14 @@ async def _emergency_stop_runtime() -> None:
     logger.info("Emergency runtime cleanup completed")
 
 def _sync_cleanup() -> None:
-    """Synchronous cleanup for interpreter shutdown scenarios."""
+    """Synchronous cleanup for interpreter shutdown scenarios.
+    
+    This is the normal cleanup path during program termination when
+    asyncio is no longer available. This is expected behavior.
+    """
     global _runtime_started
     
-    logger.info("Performing synchronous cleanup")
+    logger.info("Performing synchronous cleanup (normal during program exit)")
     
     # Set shutdown flags on all agents (safe during interpreter shutdown)
     for agent in _agent_registry:
@@ -944,6 +1066,7 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     
     message_id = f"{conversation_id}:{time.time()}"
     result_list = f"result:{message_id}"
+    current_time = time.time()
     
     env = Envelope(
         conversation_id=conversation_id,
@@ -955,9 +1078,13 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
         sender_agent_id="process_request",
         kind="task",
         payload=payload,
-        ts=time.time(),
+        ts=current_time,
         result_list=result_list,
         trace=[],
+        # Initialize safety attributes
+        process_count=0,
+        total_processing_time=0.0,
+        create_ts=current_time,
     )
     
     logger.info(f"[process_request] Starting request {message_id}")
