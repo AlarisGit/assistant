@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any
 
 import config
+import agent
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ class AlarisAssistant:
     async def process_message(self, user_id: str, message: str) -> Dict[str, Any]:
         logger.info(f"Processing message from user {user_id}: {message}")
         response = dict()
-        response["message"] = f"Hello {user_id}, how can I help you?"
+        response["message"] = await agent.process_request(user_id, message)
         return response
    
     async def clear_conversation_history(self, user_id: str) -> bool:
