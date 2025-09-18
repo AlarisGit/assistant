@@ -1,8 +1,20 @@
-# Redis Streams-Based Agentic Architecture
+# Production-Grade Redis Streams Agentic Architecture
 
 ## Overview
 
-This document defines the Redis Streams-based architecture for the SMS Platform Assistant, implementing a unified agent system where all conversation state flows through Envelope messages. This approach eliminates complex context merging while providing natural distributed processing capabilities.
+This document defines the production-grade Redis Streams-based architecture for the SMS Platform Assistant, implementing a unified agent system with comprehensive reliability, monitoring, and connection management features. The system provides enterprise-level robustness while maintaining developer simplicity through automatic cleanup, connection pooling, retry logic, and comprehensive statistics reporting.
+
+## Architecture Evolution
+
+### Version 2.0 - Production Features
+- ✅ **Redis Connection Pool**: Eliminates bottlenecks with 20-connection pool
+- ✅ **Automatic Retry Logic**: Exponential backoff for connection failures
+- ✅ **Health Monitoring**: Continuous Redis connection health checks
+- ✅ **Safety Limits**: Circuit breaker system prevents resource exhaustion
+- ✅ **File-Based Statistics**: Clean reporting without logger noise
+- ✅ **Automatic Cleanup**: Graceful shutdown on exit/signals
+- ✅ **Dynamic Agent Registry**: Runtime agent creation and management
+- ✅ **Zero-Config Agents**: Automatic role derivation from class names
 
 ## Core Architecture Principles
 
@@ -12,25 +24,86 @@ This document defines the Redis Streams-based architecture for the SMS Platform 
 - Stateless design with all conversation data in Envelope payload
 - Horizontal scaling through multiple instances per role
 
-### 2. Redis Streams Communication
+### 2. Production-Grade Redis Management
+- **Connection Pool**: 20-connection pool with automatic scaling
+- **Retry Logic**: Exponential backoff for temporary failures
+- **Health Monitoring**: 30-second ping checks with performance tracking
+- **Graceful Recovery**: Automatic reconnection and failure detection
+
+### 3. Redis Streams Communication
 - **Point-to-Role**: `stream:role:{role}` with consumer groups for load balancing
 - **Point-to-Agent**: `stream:agent:{agent_id}` for direct routing
 - **Broadcast Control**: Pub/Sub channels for system commands
 - **Reply Lists**: Per-request Redis lists for external response delivery
 
-### 3. Envelope-Based State Management
+### 4. Envelope-Based State Management
 - Single message type containing all conversation data
 - No separate Context object - everything in payload
 - Complete trace system for debugging and observability
 - Manager-controlled history cleanup and state management
 
-## Current Implementation
+## Production System Architecture
 
-### Demo Pipeline
+### High-Level System Overview
+
+```mermaid
+graph TB
+    subgraph "External Interfaces"
+        TG[Telegram Bot]
+        API[REST API]
+        CLI[CLI Interface]
+    end
+    
+    subgraph "Redis Connection Pool"
+        POOL["Connection Pool<br/>Max: 20 connections<br/>Retry: Exponential Backoff<br/>Health: 30s checks"]
+    end
+    
+    subgraph "Agent Runtime"
+        REG["Dynamic Agent Registry<br/>Auto-registration<br/>Runtime creation"]
+        STATS["Statistics Agent<br/>File-based reporting<br/>Performance monitoring"]
+    end
+    
+    subgraph "Redis Infrastructure"
+        STREAMS["Redis Streams<br/>Role & Agent routing"]
+        PUBSUB["Pub/Sub Channels<br/>Broadcast control"]
+        LISTS["Result Lists<br/>External responses"]
+    end
+    
+    subgraph "Safety Systems"
+        CIRCUIT["Circuit Breaker<br/>Process limits<br/>Time limits<br/>Age limits"]
+        CLEANUP["Automatic Cleanup<br/>Signal handlers<br/>Exit handlers"]
+    end
+    
+    TG --> POOL
+    API --> POOL
+    CLI --> POOL
+    POOL --> STREAMS
+    POOL --> PUBSUB
+    POOL --> LISTS
+    REG --> STREAMS
+    STATS --> STREAMS
+    CIRCUIT --> STREAMS
+    CLEANUP --> REG
+```
+
+### Current Demo Pipeline
 
 **Current PoC Pipeline:**
-```
-manager → uppercase → manager → reverse → manager → result_list
+```mermaid
+sequenceDiagram
+    participant E as External Client
+    participant M as Manager Agent
+    participant U as Uppercase Agent
+    participant R as Reverse Agent
+    participant L as Result List
+    
+    E->>M: "Hello, world!" (stage: start)
+    M->>U: Forward to uppercase (stage: upper)
+    U->>M: "HELLO, WORLD!" (stage: upper)
+    M->>R: Forward to reverse (stage: reverse)
+    R->>M: "!DLROW ,OLLEH" (stage: reverse)
+    M->>L: Final result
+    L->>E: "!DLROW ,OLLEH"
 ```
 
 #### Implemented Agents
@@ -82,26 +155,52 @@ class QualityControlAgent(BaseAgent):
     role = "quality_control"
 ```
 
-### Envelope Structure
+### Production Envelope Structure
 
 ```python
 @dataclass
 class Envelope:
+    # Message Identification
     conversation_id: str              # Conversation correlation key
     message_id: str                   # Unique message identifier
+    
+    # Routing Information
     target_role: Optional[str]        # Target role for routing
     target_agent_id: Optional[str]    # Direct agent targeting
     target_list: Optional[str]        # Target Redis list for external responses
     
+    # Sender Information
     sender_role: str                  # Sender role
     sender_agent_id: str              # Sender agent ID
     
+    # Message Type and Data
     kind: str                         # "task" | "result" | "control" | "status"
     payload: Dict[str, Any]           # All conversation data and results
-    ts: float                         # Timestamp
+    update_ts: float                  # Last update timestamp
     
+    # Response Routing
     result_list: str                  # Final response destination list
+    
+    # Observability and Safety
     trace: List[Dict[str, Any]]       # Complete execution audit trail
+    process_count: int = 0            # Safety: Processing step counter
+    total_processing_time: float = 0.0  # Safety: Cumulative processing time
+    create_ts: float = 0.0            # Safety: Envelope creation timestamp
+```
+
+### Trace Entry Structure
+
+```python
+# Each agent adds detailed trace entry
+trace_entry = {
+    "start_ts": float,               # Processing start time
+    "role": str,                     # Agent role
+    "agent_id": str,                 # Specific agent instance
+    "end_ts": float,                 # Processing end time
+    "duration": float,               # Processing duration (end_ts - start_ts)
+    "error": Optional[str],          # Error message if processing failed
+    "safety_violation": Optional[bool]  # True if safety limits triggered
+}
 ```
 
 ### Current Demo Payload Schema
@@ -159,6 +258,207 @@ payload = {
     "errors": [],                     # Accumulated errors
     "__agent_timeout_sec": 30.0       # Per-message timeout override
 }
+```
+
+## Production Features
+
+### Redis Connection Pool Management
+
+```mermaid
+graph LR
+    subgraph "Connection Pool Architecture"
+        A1[Agent 1] --> POOL["Redis Connection Pool<br/>Max: 20 connections<br/>Health checks: 30s"]
+        A2[Agent 2] --> POOL
+        A3[Agent 3] --> POOL
+        A4[Agent N] --> POOL
+        
+        POOL --> R1[Redis Connection 1]
+        POOL --> R2[Redis Connection 2]
+        POOL --> R3[Redis Connection ...]
+        POOL --> RN[Redis Connection 20]
+        
+        R1 --> REDIS[Redis Server]
+        R2 --> REDIS
+        R3 --> REDIS
+        RN --> REDIS
+    end
+```
+
+#### Connection Pool Features
+```python
+class RedisConnectionManager:
+    """
+    Production-grade Redis connection management:
+    - Connection pooling (20 max connections)
+    - Exponential backoff retry logic
+    - Health monitoring with ping checks
+    - Automatic failure detection and recovery
+    - Graceful connection cleanup
+    """
+    
+    async def initialize(self) -> None:
+        retry_policy = Retry(
+            backoff=ExponentialBackoff(),
+            retries=3,  # Configurable via REDIS_RETRY_ATTEMPTS
+            supported_errors=(ConnectionError, TimeoutError, ResponseError)
+        )
+        
+        self.pool = ConnectionPool.from_url(
+            REDIS_URL,
+            max_connections=20,  # Configurable via REDIS_MAX_CONNECTIONS
+            retry=retry_policy,
+            socket_timeout=5.0,  # Configurable via REDIS_SOCKET_TIMEOUT
+            health_check_interval=30  # Configurable via REDIS_HEALTH_CHECK_INTERVAL
+        )
+```
+
+### Safety Limits (Circuit Breaker System)
+
+```mermaid
+flowchart TD
+    START[Envelope Received] --> CHECK{Safety Check}
+    
+    CHECK -->|Process Count >= 50| STOP1["Circuit Breaker:<br/>Too Many Steps"]
+    CHECK -->|Total Time >= 300s| STOP2["Circuit Breaker:<br/>Processing Timeout"]
+    CHECK -->|Age >= 600s| STOP3["Circuit Breaker:<br/>Stale Message"]
+    CHECK -->|All Limits OK| PROCESS[Process Envelope]
+    
+    STOP1 --> ERROR["Create Safety Error<br/>Add to Trace<br/>Return to Caller"]
+    STOP2 --> ERROR
+    STOP3 --> ERROR
+    
+    PROCESS --> UPDATE["Increment process_count<br/>Add processing_time<br/>Update trace"]
+    UPDATE --> SEND[Send to Next Agent]
+```
+
+#### Safety Configuration
+```python
+# Configurable safety limits
+MAX_PROCESS_COUNT = 50          # Maximum processing steps
+MAX_TOTAL_PROCESSING_TIME = 300.0  # Maximum 5 minutes processing
+MAX_ENVELOPE_AGE = 600.0        # Maximum 10 minutes envelope age
+
+# Safety check before each agent processes envelope
+def check_safety_limits(env: Envelope) -> Optional[str]:
+    if env.process_count >= MAX_PROCESS_COUNT:
+        return f"Process count limit exceeded: {env.process_count} >= {MAX_PROCESS_COUNT}"
+    
+    if env.total_processing_time >= MAX_TOTAL_PROCESSING_TIME:
+        return f"Total processing time limit exceeded: {env.total_processing_time:.2f}s >= {MAX_TOTAL_PROCESSING_TIME}s"
+    
+    if env.create_ts > 0:
+        envelope_age = time.time() - env.create_ts
+        if envelope_age >= MAX_ENVELOPE_AGE:
+            return f"Envelope age limit exceeded: {envelope_age:.2f}s >= {MAX_ENVELOPE_AGE}s"
+    
+    return None
+```
+
+### File-Based Statistics System
+
+```mermaid
+graph TD
+    STATS[Statistics Agent] --> COLLECT["Collect Metrics:<br/>- Agent performance<br/>- Envelope metrics<br/>- Processing times<br/>- Error rates"]
+    
+    COLLECT --> LIVE["agent_statistics.txt<br/>(Live reporting every 60s)"]
+    COLLECT --> FINAL["agent_final_statistics.txt<br/>(On system shutdown)"]
+    
+    LIVE --> CLEAN1["Clean Format:<br/>- No logger timestamps<br/>- No icons/emojis<br/>- Professional layout"]
+    
+    FINAL --> CLEAN2["Session Summary:<br/>- Total uptime<br/>- Agent performance<br/>- System efficiency"]
+```
+
+#### Statistics Output Example
+```
+================================================================================
+COMPREHENSIVE AGENT PERFORMANCE STATISTICS
+================================================================================
+
+System Uptime: 60.0s | Report Interval: 60.0s
+Active Agents: 3
+
+RUN STATISTICS:
+   Total Runs: 50 | Since Last Report: 50
+   By Role (Total | Since Last):
+      manager: 30 | 30
+      reverse: 10 | 10
+      uppercase: 10 | 10
+
+ENVELOPE METRICS:
+   Total Envelopes: 10 | Since Last Report: 10
+   Average Envelope Age: 1.00s | Recent (last 10): 1.00s
+   Average Processing Time: 1.00s | Recent: 1.00s
+   Average Process Count: 1.0 steps | Recent: 1.0 steps
+
+AGENT REGISTRY:
+   Agent ID             Role         Status       Last Update  Runs     Avg Time  
+   -------------------- ------------ ------------ ------------ -------- ----------
+   M4:14278:2           manager      idle         0.9s ago     30       1.002s
+   M4:14278:3           uppercase    idle         3.9s ago     10       1.002s
+   M4:14278:4           reverse      idle         1.9s ago     10       1.002s
+================================================================================
+```
+
+### Automatic Cleanup System
+
+```mermaid
+flowchart TD
+    subgraph "Cleanup Triggers"
+        EXIT["Normal Exit<br/>(atexit handler)"]
+        SIGINT["Ctrl+C<br/>(SIGINT)"]
+        SIGTERM["Process Kill<br/>(SIGTERM)"]
+    end
+    
+    EXIT --> DETECT{"Event Loop<br/>State?"}
+    SIGINT --> DETECT
+    SIGTERM --> DETECT
+    
+    DETECT -->|Running| SCHEDULE["Schedule Cleanup Task<br/>loop.create_task()"]
+    DETECT -->|Stopped| ASYNC["Run Async Cleanup<br/>asyncio.run()"]
+    DETECT -->|Missing| SYNC["Fallback Sync Cleanup<br/>_sync_cleanup()"]
+    
+    SCHEDULE --> CLEANUP["Emergency Stop Runtime<br/>- Stop agents (2s timeout)<br/>- Close Redis pool (1s timeout)<br/>- Generate final stats"]
+    ASYNC --> CLEANUP
+    SYNC --> CLEANUP
+    
+    CLEANUP --> SUCCESS["Graceful Shutdown<br/>✅ No hanging processes<br/>✅ No leaked connections"]
+```
+
+### Dynamic Agent Registry
+
+```mermaid
+classDiagram
+    class BaseAgent {
+        +__init__()
+        +start()
+        +stop()
+        +process(env)
+        -_register_agent()
+    }
+    
+    class AgentRegistry {
+        -_agent_registry: List[BaseAgent]
+        -_runtime_started: bool
+        +register_agent(agent)
+        +start_runtime()
+        +stop_runtime()
+    }
+    
+    class ManagerAgent {
+        +role: "manager"
+        +process(env)
+    }
+    
+    class StatsAgent {
+        +role: "stats"
+        +process(env)
+        +generate_statistics()
+    }
+    
+    BaseAgent <|-- ManagerAgent
+    BaseAgent <|-- StatsAgent
+    BaseAgent --> AgentRegistry : auto-registers
+    AgentRegistry --> BaseAgent : manages lifecycle
 ```
 
 ## Redis Communication Patterns
@@ -396,24 +696,73 @@ env.trace.append(trace_item)
 }
 ```
 
+## Production Configuration
+
+### Environment Variables
+
+```bash
+# Redis Connection Pool Settings
+REDIS_URL="redis://localhost:6379/0"
+REDIS_MAX_CONNECTIONS=20              # Connection pool size
+REDIS_RETRY_ATTEMPTS=3                # Retry count for failed operations
+REDIS_SOCKET_TIMEOUT=5.0              # Socket operation timeout
+REDIS_SOCKET_CONNECT_TIMEOUT=5.0      # Connection establishment timeout
+REDIS_HEALTH_CHECK_INTERVAL=30        # Health check frequency (seconds)
+
+# Safety Limits
+MAX_PROCESS_COUNT=50                  # Maximum processing steps per envelope
+MAX_TOTAL_PROCESSING_TIME=300.0       # Maximum processing time (seconds)
+MAX_ENVELOPE_AGE=600.0                # Maximum envelope age (seconds)
+
+# Statistics Reporting
+REPORT_INTERVAL_SECONDS=60            # Statistics reporting interval
+
+# Logging
+LOG_LEVEL=INFO                        # Logging level
+LOG_DIR="./log"                       # Log directory
+DEBUG_LOG_FILE="debug.log"            # Debug log file
+INFO_LOG_FILE="info.log"              # Info log file
+```
+
+### Production Deployment Checklist
+
+- ✅ **Redis Security**: Use TLS and authentication in production
+- ✅ **Connection Limits**: Tune `REDIS_MAX_CONNECTIONS` based on load
+- ✅ **Safety Limits**: Adjust timeouts based on expected processing times
+- ✅ **Monitoring**: Set up log aggregation for statistics files
+- ✅ **Health Checks**: Monitor Redis connection health metrics
+- ✅ **Resource Limits**: Set appropriate memory and CPU limits
+- ✅ **Signal Handling**: Ensure graceful shutdown in container environments
+
 ## Development and Testing
 
-### Adding New Agents
+### Zero-Config Agent Creation
+
 ```python
-# 1. Create agent class
-class NewFeatureAgent(BaseAgent):
-    def __init__(self, redis: Redis):
-        super().__init__(redis, role="new_feature")
+# Modern agent creation - automatic role derivation and registration
+class TranslationAgent(BaseAgent):  # Role automatically becomes "translation"
+    def __init__(self):
+        super().__init__()  # Zero parameters needed!
     
     async def process(self, env: Envelope) -> Envelope:
-        # Process and update payload
-        env.payload["new_feature_result"] = {...}
+        # Business logic here
+        env.payload["translation_result"] = await translate(env.payload["text"])
         env.kind = "result"
         return env
 
-# 2. Update ManagerAgent routing logic
-# 3. Add to runtime startup
-# 4. Test with isolated envelopes
+# Agent automatically registers and starts when runtime is active
+translation_agent = TranslationAgent()  # That's it!
+```
+
+### Development Workflow
+
+```mermaid
+flowchart TD
+    CREATE["1. Create Agent Class<br/>class MyAgent(BaseAgent)"] --> IMPLEMENT["2. Implement process()<br/>Business logic only"]
+    IMPLEMENT --> INSTANTIATE["3. Create Instance<br/>agent = MyAgent()"]
+    INSTANTIATE --> AUTO["4. Automatic Features<br/>✅ Role derived from class name<br/>✅ Auto-registered in registry<br/>✅ Redis connection managed<br/>✅ Safety limits applied<br/>✅ Statistics collected"]
+    AUTO --> TEST["5. Test with Envelopes<br/>Unit test process() method"]
+    TEST --> DEPLOY["6. Production Ready<br/>✅ Automatic cleanup<br/>✅ Health monitoring<br/>✅ Error handling"]
 ```
 
 ### Testing Strategy
@@ -497,13 +846,53 @@ Complete execution history preserved in `env.trace` for security auditing and de
 
 ## Summary
 
-This Redis Streams-based architecture provides:
+This production-grade Redis Streams-based architecture provides:
 
-✅ **Simplified State Management**: No complex context merging  
-✅ **Natural Distribution**: Horizontal scaling across hosts  
-✅ **Complete Observability**: Full trace system and lifecycle monitoring  
-✅ **Flexible Routing**: Point-to-role and point-to-agent messaging  
-✅ **Reliability**: Timeouts, error handling, and retry mechanisms  
-✅ **Integration Ready**: Works with existing LLM and RAG infrastructure  
+### Core Features
+✅ **Simplified State Management**: No complex context merging - everything in Envelope payload  
+✅ **Natural Distribution**: Horizontal scaling across hosts with Redis Streams load balancing  
+✅ **Complete Observability**: Full trace system with precise timing and error tracking  
+✅ **Flexible Routing**: Point-to-role and point-to-agent messaging patterns  
+✅ **Integration Ready**: Works seamlessly with existing LLM and RAG infrastructure  
 
-The design starts with a simple proof-of-concept pipeline and provides clear extension points for future optimization and specialization.
+### Production Features
+✅ **Redis Connection Pool**: 20-connection pool eliminates bottlenecks and improves performance  
+✅ **Automatic Retry Logic**: Exponential backoff handles temporary Redis connection failures  
+✅ **Health Monitoring**: Continuous Redis ping checks with performance tracking  
+✅ **Safety Limits**: Circuit breaker system prevents infinite loops and resource exhaustion  
+✅ **File-Based Statistics**: Clean professional reporting without logger noise  
+✅ **Automatic Cleanup**: Graceful shutdown on exit/signals with multiple fallback layers  
+✅ **Dynamic Agent Registry**: Runtime agent creation and management  
+✅ **Zero-Config Development**: Automatic role derivation and Redis connection management  
+
+### Reliability & Operations
+✅ **Comprehensive Error Handling**: Safety violations, timeouts, and connection failures  
+✅ **Production Monitoring**: Real-time statistics and performance metrics  
+✅ **Graceful Degradation**: System continues operating during minor issues  
+✅ **Developer Experience**: Ultra-simple agent creation with automatic infrastructure management  
+✅ **Enterprise Ready**: Configurable limits, security features, and deployment checklist  
+
+### Architecture Benefits
+
+```mermaid
+graph TB
+    subgraph "Developer Experience"
+        SIMPLE["Ultra-Simple<br/>Zero-config agents<br/>Automatic registration<br/>Focus on business logic"]
+    end
+    
+    subgraph "Production Reliability"
+        ROBUST["Enterprise-Grade<br/>Connection pooling<br/>Retry logic<br/>Safety limits<br/>Health monitoring"]
+    end
+    
+    subgraph "Operational Excellence"
+        OPS["Operations-Friendly<br/>File-based statistics<br/>Automatic cleanup<br/>Graceful shutdown<br/>Comprehensive logging"]
+    end
+    
+    SIMPLE --> REDIS["Redis Streams<br/>Distributed Processing"]
+    ROBUST --> REDIS
+    OPS --> REDIS
+    
+    REDIS --> SCALE["Horizontal Scaling<br/>High Availability<br/>Production Ready"]
+```
+
+The architecture successfully balances **developer simplicity** with **production robustness**, providing enterprise-grade reliability while maintaining an ultra-simple development experience. The system starts with a working proof-of-concept and scales seamlessly to production workloads.
