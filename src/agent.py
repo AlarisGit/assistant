@@ -235,8 +235,10 @@ from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Optional, List
 from datetime import datetime
 
-from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+from redis.asyncio import Redis, ConnectionPool
+from redis.exceptions import ResponseError, ConnectionError, TimeoutError
+from redis.retry import Retry
+from redis.backoff import ExponentialBackoff
 
 import config
 import logging
@@ -488,7 +490,7 @@ class BaseAgent:
         self,
         task_timeout_sec: float = DEFAULT_TASK_TIMEOUT_SEC,
     ) -> None:
-        self.redis = get_redis()
+        self.redis = None  # Will be initialized in start()
         self.role = derive_role_from_class_name(self.__class__.__name__)
         self.agent_id = build_agent_id()
         self.task_timeout_sec = task_timeout_sec
@@ -518,6 +520,9 @@ class BaseAgent:
 
     async def start(self) -> None:
         """Create groups/streams, emit 'init', and start loops."""
+        # Initialize Redis client
+        self.redis = await get_redis()
+        
         await ensure_group(self.redis, self._role_stream, self._role_group)
         await ensure_group(self.redis, self._agent_stream, self._agent_group)
         logger.info(f"Started {self.role} agent {self.agent_id}")
@@ -878,6 +883,9 @@ class StatsAgent(BaseAgent):
         self._stats_task = None
 
     async def start(self) -> None:
+        # Initialize Redis client
+        self.redis = await get_redis()
+        
         await self._publish_status("init")
         self._t_broadcast = asyncio.create_task(self._broadcast_loop())
         self._t_heartbeat = asyncio.create_task(self._heartbeat_loop())
@@ -1316,15 +1324,134 @@ class StatsAgent(BaseAgent):
             logger.debug(f"Failed to write final statistics report: {e}")
 
 
-_redis: Redis = Redis.from_url(REDIS_URL, decode_responses=False)
+# Global Redis connection pool and manager
+_redis_pool: Optional[ConnectionPool] = None
+_redis_client: Optional[Redis] = None
+_redis_health_task: Optional[asyncio.Task] = None
 
-def get_redis() -> Redis:
-    """Get the global Redis connection instance.
+class RedisConnectionManager:
+    """Manages Redis connection pool with retry logic and health monitoring."""
     
-    This provides a centralized Redis connection that all agents can use,
-    eliminating the need to pass Redis connections as constructor arguments.
+    def __init__(self):
+        self.pool: Optional[ConnectionPool] = None
+        self.client: Optional[Redis] = None
+        self.health_task: Optional[asyncio.Task] = None
+        self.is_healthy = True
+        self.last_health_check = 0.0
+        
+    async def initialize(self) -> None:
+        """Initialize Redis connection pool with retry configuration."""
+        if self.pool is not None:
+            return  # Already initialized
+            
+        try:
+            # Create retry configuration
+            retry_policy = Retry(
+                backoff=ExponentialBackoff(),
+                retries=config.REDIS_RETRY_ATTEMPTS,
+                supported_errors=(
+                    ConnectionError,
+                    TimeoutError,
+                    ResponseError,
+                )
+            )
+            
+            # Create connection pool
+            self.pool = ConnectionPool.from_url(
+                REDIS_URL,
+                max_connections=config.REDIS_MAX_CONNECTIONS,
+                retry=retry_policy,
+                socket_timeout=config.REDIS_SOCKET_TIMEOUT,
+                socket_connect_timeout=config.REDIS_SOCKET_CONNECT_TIMEOUT,
+                decode_responses=False,
+                health_check_interval=config.REDIS_HEALTH_CHECK_INTERVAL
+            )
+            
+            # Create Redis client with the pool
+            self.client = Redis(connection_pool=self.pool)
+            
+            # Test the connection
+            await self.client.ping()
+            logger.info(f"Redis connection pool initialized: {config.REDIS_MAX_CONNECTIONS} max connections")
+            
+            # Start health monitoring
+            self.health_task = asyncio.create_task(self._health_monitor())
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Redis connection pool: {e}")
+            raise
+    
+    async def get_client(self) -> Redis:
+        """Get Redis client, initializing if necessary."""
+        if self.client is None:
+            await self.initialize()
+        return self.client
+    
+    async def _health_monitor(self) -> None:
+        """Monitor Redis connection health and log issues."""
+        while True:
+            try:
+                await asyncio.sleep(config.REDIS_HEALTH_CHECK_INTERVAL)
+                
+                if self.client:
+                    start_time = time.time()
+                    await self.client.ping()
+                    ping_time = (time.time() - start_time) * 1000  # ms
+                    
+                    if not self.is_healthy:
+                        logger.info(f"Redis connection restored (ping: {ping_time:.1f}ms)")
+                        self.is_healthy = True
+                    
+                    self.last_health_check = time.time()
+                    
+                    # Log slow pings
+                    if ping_time > 100:  # > 100ms
+                        logger.warning(f"Slow Redis ping: {ping_time:.1f}ms")
+                        
+            except Exception as e:
+                if self.is_healthy:
+                    logger.error(f"Redis health check failed: {e}")
+                    self.is_healthy = False
+                    
+    async def close(self) -> None:
+        """Close Redis connections and cleanup."""
+        if self.health_task:
+            self.health_task.cancel()
+            try:
+                await self.health_task
+            except asyncio.CancelledError:
+                pass
+                
+        if self.client:
+            await self.client.aclose()
+            self.client = None
+            
+        if self.pool:
+            await self.pool.aclose()
+            self.pool = None
+            
+        logger.info("Redis connection pool closed")
+
+# Global Redis manager instance
+_redis_manager = RedisConnectionManager()
+
+async def get_redis() -> Redis:
+    """Get Redis client from connection pool with automatic retry logic.
+    
+    This provides a robust Redis client with:
+    - Connection pooling for better performance
+    - Automatic retry on connection failures
+    - Health monitoring and logging
     """
-    return _redis
+    return await _redis_manager.get_client()
+
+async def init_redis() -> None:
+    """Initialize Redis connection pool. Call this at startup."""
+    await _redis_manager.initialize()
+
+async def close_redis() -> None:
+    """Close Redis connection pool. Call this at shutdown."""
+    await _redis_manager.close()
 
 # -------------------------- Automatic Cleanup System --------------------------
 
@@ -1396,11 +1523,11 @@ async def _emergency_stop_runtime() -> None:
         except Exception as e:
             logger.error(f"Error stopping {agent.role} agent {agent.agent_id}: {e}")
     
-    # Close Redis connection
+    # Close Redis connection pool
     try:
-        await asyncio.wait_for(_redis.aclose(), timeout=1.0)
+        await asyncio.wait_for(close_redis(), timeout=1.0)
     except Exception as e:
-        logger.error(f"Error closing Redis connection: {e}")
+        logger.error(f"Error closing Redis connection pool: {e}")
     
     _runtime_started = False
     logger.info("Emergency runtime cleanup completed")
@@ -1440,13 +1567,13 @@ def _sync_cleanup() -> None:
             # During interpreter shutdown, some operations may fail - that's OK
             logger.debug(f"Minor error setting shutdown flag for {agent.role} agent: {e}")
     
-    # Try to close Redis connection synchronously if possible
+    # Try to close Redis connection pool synchronously if possible
     try:
         # Don't try to close Redis during interpreter shutdown as it may hang
-        # The OS will clean up the connection anyway
-        logger.info("Skipping Redis cleanup during interpreter shutdown (OS will handle)")
+        # The OS will clean up the connections anyway
+        logger.info("Skipping Redis pool cleanup during interpreter shutdown (OS will handle)")
     except Exception as e:
-        logger.debug(f"Redis cleanup skipped: {e}")
+        logger.debug(f"Redis pool cleanup skipped: {e}")
     
     _runtime_started = False
     logger.info("Synchronous cleanup completed successfully")
@@ -1522,6 +1649,10 @@ async def start_runtime() -> None:
     if _runtime_started:
         return
     
+    # Initialize Redis connection pool first
+    logger.info("Initializing Redis connection pool")
+    await init_redis()
+    
     logger.info(f"Starting runtime with {len(_agent_registry)} registered agents")
     for agent in _agent_registry:
         logger.info(f"Starting {agent.role} agent {agent.agent_id}")
@@ -1562,7 +1693,8 @@ async def stop_runtime() -> None:
         logger.info(f"Stopping {agent.role} agent {agent.agent_id}")
         await agent.stop()
     
-    await _redis.aclose()
+    # Close Redis connection pool
+    await close_redis()
     _runtime_started = False
     logger.info("Runtime stopped successfully")
 
@@ -1577,7 +1709,8 @@ async def broadcast_command(cmd: str, role: Optional[str] = None, **kwargs: Any)
     """
     payload = {"cmd": cmd, "ts": time.time(), **kwargs}
     channel = role_broadcast_channel(role) if role else BROADCAST_ALL
-    await _redis.publish(channel, json.dumps(payload, ensure_ascii=False))
+    redis = await get_redis()
+    await redis.publish(channel, json.dumps(payload, ensure_ascii=False))
 
 
 async def process_request(role: str, conversation_id: str, payload: dict) -> str:
@@ -1621,7 +1754,8 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     logger.info(f"[process_request] Starting request {message_id}")
     
     # Send initial task to manager
-    await xadd(_redis, role_stream_key("manager"), env.to_stream_fields())
+    redis = await get_redis()
+    await xadd(redis, role_stream_key("manager"), env.to_stream_fields())
     logger.info(f"[process_request] Sent initial task to manager stream for {message_id}")
     
     # Wait for final result with shutdown awareness
@@ -1629,7 +1763,7 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     
     try:
         # Create tasks for both result waiting and shutdown detection
-        result_task = asyncio.create_task(_redis.brpop(result_list, timeout=10))
+        result_task = asyncio.create_task(redis.brpop(result_list, timeout=10))
         shutdown_event = _get_shutdown_event()
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         

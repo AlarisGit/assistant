@@ -128,6 +128,15 @@ REDIS_USERNAME = os.getenv("REDIS_USERNAME") or None
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
 
+# Redis Connection Pool Configuration
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))  # Pool size
+REDIS_RETRY_ON_TIMEOUT = os.getenv("REDIS_RETRY_ON_TIMEOUT", "true").lower() == "true"
+REDIS_RETRY_ON_ERROR = os.getenv("REDIS_RETRY_ON_ERROR", "true").lower() == "true"
+REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "3"))
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0"))  # seconds
+REDIS_SOCKET_CONNECT_TIMEOUT = float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0"))  # seconds
+REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))  # seconds
+
 MIN_CHUNK_TOKENS = int(os.getenv("MIN_CHUNK_TOKENS", 50))
 OVERLAP_CHUNK_TOKENS = int(os.getenv("OVERLAP_CHUNK_TOKENS", 75))
 MAX_CHUNK_TOKENS = int(os.getenv("MAX_CHUNK_TOKENS", 512))
