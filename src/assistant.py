@@ -139,12 +139,11 @@ async def process_user_message(user_id: str, message: str) -> Dict[str, Any]:
 if __name__ == "__main__":
     async def _demo():
         try:
-            message = f"Hello, world! [{datetime.now().isoformat()}]"
-            res = await process_user_message("conv1", message)
-            print("RESULT:", res)  # Expected: "!DLROW ,OLLEH"
-
-            # Example: broadcast a reload to uppercase agents
-            await broadcast_command("reload", role="uppercase")
+            for i in range(10):
+                message = f"Hello, world! [{datetime.now().isoformat()}]"
+                res = await process_user_message("conv1", message)
+                print("RESULT:", res)  # Expected: "!DLROW ,OLLEH"
+                await asyncio.sleep(1)
 
             # Example: global graceful shutdown (agents finish current tasks)
             await broadcast_command("shutdown")

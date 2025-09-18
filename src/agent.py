@@ -270,10 +270,11 @@ def role_broadcast_channel(role: str) -> str:
     return f"broadcast:role:{role}"
 
 BROADCAST_ALL = "broadcast:all"
-STATUS_ROLE = "stat"  # lifecycle/heartbeat broadcast role
+STATUS_ROLE = "stats"  # lifecycle/heartbeat broadcast role (matches StatsAgent role)
 
 HEARTBEAT_INTERVAL_SEC = 5.0
 DEFAULT_TASK_TIMEOUT_SEC = 60.0  # safety timeout per agent (can be overridden per-envelope)
+STATS_REPORT_INTERVAL_SEC = 60.0  # how often to print comprehensive statistics
 
 # -------------------------- Safety Limits (Circuit Breaker) --------------------------
 
@@ -339,7 +340,7 @@ class Envelope:
 
       kind:   "task" | "result" | "control" | "status"
       payload:arbitrary JSON (domain inputs/outputs, control flags, errors)
-      ts:     unix timestamp
+      update_ts: unix timestamp (last update time)
 
       trace: Breadcrumbs to trace the path (agent id, role, ts, notes)
     """
@@ -354,7 +355,7 @@ class Envelope:
 
     kind: str
     payload: Dict[str, Any]
-    ts: float
+    update_ts: float
 
     result_list: str
 
@@ -363,7 +364,7 @@ class Envelope:
     # Safety/Circuit Breaker attributes
     process_count: int = 0  # Number of times this envelope has been processed by agents
     total_processing_time: float = 0.0  # Cumulative time spent in agent.process() methods (sum of trace durations)
-    create_ts: float = 0.0  # Envelope creation timestamp (for measuring overall envelope age, not individual steps)
+    create_ts: float = 0.0  # Envelope creation ts (for measuring overall envelope age, not individual steps)
 
     def to_stream_fields(self) -> Dict[str, str]:
         """Serialize to field/value pairs for XADD."""
@@ -424,7 +425,7 @@ def create_safety_error(env: Envelope, error_message: str, agent_role: str, agen
         "message": error_message,
         "agent_role": agent_role,
         "agent_id": agent_id,
-        "timestamp": time.time()
+        "ts": time.time()
     })
     
     # Add error trace entry
@@ -736,6 +737,9 @@ class BaseAgent:
             
             env.trace.append(trace_item)
             
+            # Report envelope completion metrics to StatsAgent
+            await self._report_envelope_completion(env, trace_item['duration'])
+            
             logger.info(f"Outgoing: {env}")
 
             await self._send(env)
@@ -743,12 +747,37 @@ class BaseAgent:
             await self._publish_status("idle")
             self._busy.clear()
     
+    async def _report_envelope_completion(self, env: Envelope, step_duration: float) -> None:
+        """Report comprehensive envelope completion metrics to StatsAgent via broadcast."""
+        try:
+            current_time = time.time()
+            
+            # Calculate envelope age (time since creation)
+            envelope_age = current_time - env.create_ts if env.create_ts > 0 else 0.0
+            
+            payload = {
+                "type": "envelope_completed",
+                "agent_id": self.agent_id,
+                "role": self.role,
+                "step_duration": step_duration,  # This processing step duration
+                "envelope_total_processing_time": env.total_processing_time,  # Total processing time
+                "envelope_process_count": env.process_count,  # Number of processing steps
+                "envelope_age": envelope_age,  # Time since envelope creation
+                "envelope_id": env.message_id,  # Unique envelope identifier
+                "conversation_id": env.conversation_id,  # Conversation identifier
+                "ts": current_time
+            }
+            channel = role_broadcast_channel(STATUS_ROLE)
+            await self.redis.publish(channel, json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.debug(f"Failed to report envelope completion: {e}")
+    
     async def _send_to_result_list(self, env: Envelope) -> None:
         """Send envelope directly to result_list for safety violations."""
         if env.result_list:
             env.sender_role = self.role
             env.sender_agent_id = self.agent_id
-            env.ts = time.time()
+            env.update_ts = time.time()
             await self.redis.lpush(env.result_list, json.dumps(asdict(env), ensure_ascii=False))
 
     async def _send(self, env: Envelope) -> None:
@@ -759,11 +788,11 @@ class BaseAgent:
         - target_agent_id: sends to specific agent stream
         - target_list: pushes raw JSON to Redis list for external consumers
         
-        Updates sender information and timestamp before sending.
+        Updates sender information and update_ts before sending.
         """
         env.sender_role = self.role
         env.sender_agent_id = self.agent_id
-        env.ts = time.time()
+        env.update_ts = time.time()
 
         if env.target_role:
             logger.info(f"[{self.role}:{self.agent_id}] Sending to role {env.target_role}: {env.message_id}")
@@ -778,8 +807,10 @@ class BaseAgent:
     async def _publish_status(self, event: str) -> None:
         """Publish lifecycle/status to role 'stat' broadcast channel."""
         payload = {
+            "type": event,            # For StatsAgent compatibility
             "kind": "status",
             "event": event,           # init | heartbeat | process | idle | reload | exit
+            "status": event,          # For StatsAgent compatibility
             "role": self.role,
             "agent_id": self.agent_id,
             "host": get_hostname(),
@@ -794,28 +825,495 @@ class BaseAgent:
 # -------------------------- Concrete agents --------------------------
 
 class StatsAgent(BaseAgent):
-    """Monitoring agent that collects lifecycle and heartbeat events.
+    """Comprehensive monitoring agent that collects and reports performance metrics.
     
-    Only subscribes to broadcast channels, doesn't consume from streams.
-    Receives status events from all other agents for observability.
-    Extend this class to persist metrics to time-series databases.
+    Tracks:
+    - Run counts (total and per-role/agent)
+    - Processing times (total and per-role/agent)
+    - Performance metrics (envelopes/second)
+    - Agent registry with status tracking
+    - Detailed performance analytics
+    
+    Reports comprehensive statistics every STATS_REPORT_INTERVAL_SEC seconds.
     """
 
+    def __init__(self):
+        super().__init__()
+        
+        # Metrics storage
+        self.start_time = time.time()
+        self.last_report_time = time.time()
+        
+        # Run counting
+        self.total_runs = 0
+        self.runs_since_last_report = 0
+        self.runs_by_role = {}  # role -> count
+        self.runs_by_agent = {}  # agent_id -> count
+        self.runs_by_role_since_last = {}  # role -> count since last report
+        self.runs_by_agent_since_last = {}  # agent_id -> count since last report
+        
+        # Processing time tracking
+        self.total_processing_time = 0.0
+        self.processing_time_since_last = 0.0
+        self.processing_time_by_role = {}  # role -> total_time
+        self.processing_time_by_agent = {}  # agent_id -> total_time
+        self.processing_time_by_role_since_last = {}  # role -> time since last report
+        self.processing_time_by_agent_since_last = {}  # agent_id -> time since last report
+        
+        # Agent registry and status tracking
+        self.agent_registry = {}  # agent_id -> {role, last_status, last_update, total_runs, total_time}
+        
+        # Performance tracking
+        self.envelope_timestamps = []  # List of envelope completion ts for rate calculation
+        
+        # Envelope-level metrics
+        self.total_envelopes_processed = 0
+        self.envelopes_since_last_report = 0
+        self.envelope_ages = []  # List of envelope ages for average calculation
+        self.envelope_processing_times = []  # List of total envelope processing times
+        self.envelope_process_counts = []  # List of envelope process counts
+        self.completed_envelopes = {}  # envelope_id -> {age, total_time, process_count, ts}
+        
+        # Reporting task
+        self._stats_task = None
 
     async def start(self) -> None:
         await self._publish_status("init")
         self._t_broadcast = asyncio.create_task(self._broadcast_loop())
         self._t_heartbeat = asyncio.create_task(self._heartbeat_loop())
+        self._stats_task = asyncio.create_task(self._stats_reporting_loop())
+
+    async def stop(self) -> None:
+        """Stop the stats agent and cancel reporting task."""
+        if self._stats_task:
+            self._stats_task.cancel()
+        await super().stop()
+
+    async def _stats_reporting_loop(self) -> None:
+        """Periodically report comprehensive statistics."""
+        try:
+            while not self._stop.is_set():
+                await asyncio.sleep(STATS_REPORT_INTERVAL_SEC)
+                if not self._stop.is_set():
+                    await self._report_comprehensive_stats()
+        except asyncio.CancelledError:
+            pass
 
     async def process_data(self, data: dict) -> None:
-        """Process broadcast status messages from other agents.
+        """Process broadcast status messages and envelope completion events.
         
-        Override this method to implement metrics collection,
-        alerting, or other monitoring functionality.
+        Collects metrics from agent status updates and envelope processing events.
         """
-        logger.debug(f"StatsAgent received: {data}")
-        # Not used in this minimal example.
+        try:
+            # Handle different types of status messages
+            msg_type = data.get('type', 'unknown')
+            agent_id = data.get('agent_id')
+            role = data.get('role')
+            
+            if msg_type == 'envelope_completed' and agent_id and role:
+                # Track envelope completion
+                self._track_envelope_completion(data)
+            elif msg_type in ('init', 'process', 'idle', 'shutdown') and agent_id and role:
+                # Track agent status updates
+                self._track_agent_status(data)
+                
+        except Exception as e:
+            logger.debug(f"StatsAgent error processing data: {e}")
+        
         return data
+    
+    def _track_envelope_completion(self, data: dict) -> None:
+        """Track metrics from completed envelope processing."""
+        agent_id = data.get('agent_id')
+        role = data.get('role')
+        step_duration = data.get('step_duration', 0.0)  # Individual step duration
+        envelope_total_time = data.get('envelope_total_processing_time', 0.0)
+        envelope_process_count = data.get('envelope_process_count', 0)
+        envelope_age = data.get('envelope_age', 0.0)
+        envelope_id = data.get('envelope_id')
+        conversation_id = data.get('conversation_id')
+        ts = data.get('ts', time.time())
+        
+        # Update run counts
+        self.total_runs += 1
+        self.runs_since_last_report += 1
+        
+        self.runs_by_role[role] = self.runs_by_role.get(role, 0) + 1
+        self.runs_by_agent[agent_id] = self.runs_by_agent.get(agent_id, 0) + 1
+        
+        self.runs_by_role_since_last[role] = self.runs_by_role_since_last.get(role, 0) + 1
+        self.runs_by_agent_since_last[agent_id] = self.runs_by_agent_since_last.get(agent_id, 0) + 1
+        
+        # Update processing times (using step duration for agent-level metrics)
+        self.total_processing_time += step_duration
+        self.processing_time_since_last += step_duration
+        
+        self.processing_time_by_role[role] = self.processing_time_by_role.get(role, 0.0) + step_duration
+        self.processing_time_by_agent[agent_id] = self.processing_time_by_agent.get(agent_id, 0.0) + step_duration
+        
+        self.processing_time_by_role_since_last[role] = self.processing_time_by_role_since_last.get(role, 0.0) + step_duration
+        self.processing_time_by_agent_since_last[agent_id] = self.processing_time_by_agent_since_last.get(agent_id, 0.0) + step_duration
+        
+        # Track envelope-level metrics (only count each envelope once)
+        if envelope_id and envelope_id not in self.completed_envelopes:
+            self.total_envelopes_processed += 1
+            self.envelopes_since_last_report += 1
+            
+            # Store envelope metrics for averaging
+            self.envelope_ages.append(envelope_age)
+            self.envelope_processing_times.append(envelope_total_time)
+            self.envelope_process_counts.append(envelope_process_count)
+            
+            # Keep track of completed envelopes to avoid double counting
+            self.completed_envelopes[envelope_id] = {
+                'age': envelope_age,
+                'total_time': envelope_total_time,
+                'process_count': envelope_process_count,
+                'ts': ts,
+                'conversation_id': conversation_id
+            }
+            
+            # Clean up old envelope records (keep last 1000 for memory management)
+            if len(self.completed_envelopes) > 1000:
+                # Remove oldest 100 entries
+                oldest_keys = sorted(self.completed_envelopes.keys())[:100]
+                for key in oldest_keys:
+                    del self.completed_envelopes[key]
+        
+        # Track envelope completion ts for rate calculation
+        self.envelope_timestamps.append(ts)
+        
+        # Keep only recent ts (last 5 minutes for rate calculation)
+        cutoff_time = ts - 300  # 5 minutes
+        self.envelope_timestamps = [ts for ts in self.envelope_timestamps if ts > cutoff_time]
+        
+        # Update agent registry
+        if agent_id not in self.agent_registry:
+            self.agent_registry[agent_id] = {
+                'role': role,
+                'last_status': 'processing',
+                'last_update': ts,
+                'total_runs': 0,
+                'total_time': 0.0
+            }
+        
+        self.agent_registry[agent_id]['total_runs'] += 1
+        self.agent_registry[agent_id]['total_time'] += step_duration
+        self.agent_registry[agent_id]['last_update'] = ts
+    
+    def _track_agent_status(self, data: dict) -> None:
+        """Track agent status updates."""
+        agent_id = data.get('agent_id')
+        role = data.get('role')
+        status = data.get('status', 'unknown')
+        ts = data.get('ts', time.time())
+        
+        if agent_id not in self.agent_registry:
+            self.agent_registry[agent_id] = {
+                'role': role,
+                'last_status': status,
+                'last_update': ts,
+                'total_runs': 0,
+                'total_time': 0.0
+            }
+        else:
+            self.agent_registry[agent_id]['last_status'] = status
+            self.agent_registry[agent_id]['last_update'] = ts
+    
+    async def _report_comprehensive_stats(self) -> None:
+        """Generate comprehensive performance statistics and write to file."""
+        current_time = time.time()
+        uptime = current_time - self.start_time
+        time_since_last_report = current_time - self.last_report_time
+        
+        # Generate report content
+        report_lines = []
+        report_lines.append("=" * 80)
+        report_lines.append("COMPREHENSIVE AGENT PERFORMANCE STATISTICS")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        # System overview
+        report_lines.append(f"System Uptime: {uptime:.1f}s | Report Interval: {time_since_last_report:.1f}s")
+        report_lines.append(f"Active Agents: {len(self.agent_registry)}")
+        report_lines.append("")
+        
+        # Run statistics
+        self._add_run_statistics(report_lines, time_since_last_report)
+        
+        # Processing time statistics
+        self._add_processing_time_statistics(report_lines, time_since_last_report)
+        
+        # Performance metrics
+        self._add_performance_metrics(report_lines, uptime, time_since_last_report)
+        
+        # Envelope metrics
+        self._add_envelope_metrics(report_lines, time_since_last_report)
+        
+        # Agent registry
+        self._add_agent_registry(report_lines, current_time)
+        
+        report_lines.append("=" * 80)
+        
+        # Write report to file
+        self._write_stats_report(report_lines)
+        
+        # Reset since-last-report counters
+        self._reset_since_last_report_counters()
+        self.last_report_time = current_time
+    
+    def _write_stats_report(self, report_lines: list) -> None:
+        """Write statistics report to file."""
+        try:
+            with open('agent_statistics.txt', 'w', encoding='utf-8') as f:
+                f.write('\n'.join(report_lines))
+        except Exception as e:
+            logger.debug(f"Failed to write statistics report: {e}")
+    
+    def _add_run_statistics(self, report_lines: list, time_since_last_report: float) -> None:
+        """Add run count statistics to report."""
+        report_lines.append("RUN STATISTICS:")
+        report_lines.append(f"   Total Runs: {self.total_runs} | Since Last Report: {self.runs_since_last_report}")
+        
+        if self.runs_by_role:
+            report_lines.append("   By Role (Total | Since Last):")
+            for role in sorted(self.runs_by_role.keys()):
+                total = self.runs_by_role[role]
+                since_last = self.runs_by_role_since_last.get(role, 0)
+                report_lines.append(f"      {role}: {total} | {since_last}")
+        
+        if self.runs_by_agent:
+            report_lines.append("   By Agent (Total | Since Last):")
+            for agent_id in sorted(self.runs_by_agent.keys()):
+                total = self.runs_by_agent[agent_id]
+                since_last = self.runs_by_agent_since_last.get(agent_id, 0)
+                report_lines.append(f"      {agent_id}: {total} | {since_last}")
+        
+        report_lines.append("")
+    
+    def _add_processing_time_statistics(self, report_lines: list, time_since_last_report: float) -> None:
+        """Add processing time statistics to report."""
+        report_lines.append("PROCESSING TIME STATISTICS:")
+        report_lines.append(f"   Total Time: {self.total_processing_time:.2f}s | Since Last Report: {self.processing_time_since_last:.2f}s")
+        
+        if self.processing_time_by_role:
+            report_lines.append("   By Role (Total | Since Last):")
+            for role in sorted(self.processing_time_by_role.keys()):
+                total = self.processing_time_by_role[role]
+                since_last = self.processing_time_by_role_since_last.get(role, 0.0)
+                report_lines.append(f"      {role}: {total:.2f}s | {since_last:.2f}s")
+        
+        if self.processing_time_by_agent:
+            report_lines.append("   By Agent (Total | Since Last):")
+            for agent_id in sorted(self.processing_time_by_agent.keys()):
+                total = self.processing_time_by_agent[agent_id]
+                since_last = self.processing_time_by_agent_since_last.get(agent_id, 0.0)
+                report_lines.append(f"      {agent_id}: {total:.2f}s | {since_last:.2f}s")
+        
+        report_lines.append("")
+    
+    def _add_performance_metrics(self, report_lines: list, uptime: float, time_since_last_report: float) -> None:
+        """Add performance metrics to report."""
+        report_lines.append("PERFORMANCE METRICS:")
+        
+        # Overall rates
+        overall_rate = self.total_runs / uptime if uptime > 0 else 0
+        recent_rate = self.runs_since_last_report / time_since_last_report if time_since_last_report > 0 else 0
+        report_lines.append(f"   Overall Rate: {overall_rate:.2f} env/s | Recent Rate: {recent_rate:.2f} env/s")
+        
+        # Rate by role
+        if self.runs_by_role:
+            report_lines.append("   Rate by Role (Overall | Recent):")
+            for role in sorted(self.runs_by_role.keys()):
+                total_runs = self.runs_by_role[role]
+                recent_runs = self.runs_by_role_since_last.get(role, 0)
+                overall_rate_role = total_runs / uptime if uptime > 0 else 0
+                recent_rate_role = recent_runs / time_since_last_report if time_since_last_report > 0 else 0
+                report_lines.append(f"      {role}: {overall_rate_role:.2f} env/s | {recent_rate_role:.2f} env/s")
+        
+        # Rate by agent
+        if self.runs_by_agent:
+            report_lines.append("   Rate by Agent (Overall | Recent):")
+            for agent_id in sorted(self.runs_by_agent.keys()):
+                total_runs = self.runs_by_agent[agent_id]
+                recent_runs = self.runs_by_agent_since_last.get(agent_id, 0)
+                overall_rate_agent = total_runs / uptime if uptime > 0 else 0
+                recent_rate_agent = recent_runs / time_since_last_report if time_since_last_report > 0 else 0
+                report_lines.append(f"      {agent_id}: {overall_rate_agent:.2f} env/s | {recent_rate_agent:.2f} env/s")
+        
+        report_lines.append("")
+    
+    def _add_envelope_metrics(self, report_lines: list, time_since_last_report: float) -> None:
+        """Add envelope-level metrics to report."""
+        report_lines.append("ENVELOPE METRICS:")
+        report_lines.append(f"   Total Envelopes: {self.total_envelopes_processed} | Since Last Report: {self.envelopes_since_last_report}")
+        
+        if self.envelope_ages:
+            # Calculate averages
+            avg_age = sum(self.envelope_ages) / len(self.envelope_ages)
+            avg_processing_time = sum(self.envelope_processing_times) / len(self.envelope_processing_times)
+            avg_process_count = sum(self.envelope_process_counts) / len(self.envelope_process_counts)
+            
+            # Calculate recent averages (last 100 envelopes or all if less)
+            recent_count = min(100, len(self.envelope_ages))
+            recent_avg_age = sum(self.envelope_ages[-recent_count:]) / recent_count if recent_count > 0 else 0
+            recent_avg_processing_time = sum(self.envelope_processing_times[-recent_count:]) / recent_count if recent_count > 0 else 0
+            recent_avg_process_count = sum(self.envelope_process_counts[-recent_count:]) / recent_count if recent_count > 0 else 0
+            
+            report_lines.append(f"   Average Envelope Age: {avg_age:.2f}s | Recent (last {recent_count}): {recent_avg_age:.2f}s")
+            report_lines.append(f"   Average Processing Time: {avg_processing_time:.2f}s | Recent: {recent_avg_processing_time:.2f}s")
+            report_lines.append(f"   Average Process Count: {avg_process_count:.1f} steps | Recent: {recent_avg_process_count:.1f} steps")
+            
+            # Min/Max statistics
+            min_age, max_age = min(self.envelope_ages), max(self.envelope_ages)
+            min_time, max_time = min(self.envelope_processing_times), max(self.envelope_processing_times)
+            min_count, max_count = min(self.envelope_process_counts), max(self.envelope_process_counts)
+            
+            report_lines.append(f"   Age Range: {min_age:.2f}s - {max_age:.2f}s")
+            report_lines.append(f"   Processing Time Range: {min_time:.2f}s - {max_time:.2f}s")
+            report_lines.append(f"   Process Count Range: {min_count} - {max_count} steps")
+        else:
+            report_lines.append("   No envelope data available yet")
+        
+        report_lines.append("")
+    
+    def _add_agent_registry(self, report_lines: list, current_time: float) -> None:
+        """Add agent registry with status and timing information to report."""
+        report_lines.append("AGENT REGISTRY:")
+        
+        if not self.agent_registry:
+            report_lines.append("   No agents registered yet")
+            return
+        
+        report_lines.append(f"   {'Agent ID':<20} {'Role':<12} {'Status':<12} {'Last Update':<12} {'Runs':<8} {'Avg Time':<10}")
+        report_lines.append(f"   {'-'*20} {'-'*12} {'-'*12} {'-'*12} {'-'*8} {'-'*10}")
+        
+        for agent_id, info in sorted(self.agent_registry.items()):
+            role = info['role']
+            status = info['last_status']
+            last_update = info['last_update']
+            total_runs = info['total_runs']
+            total_time = info['total_time']
+            
+            time_since_update = current_time - last_update
+            avg_time = total_time / total_runs if total_runs > 0 else 0
+            
+            report_lines.append(f"   {agent_id:<20} {role:<12} {status:<12} {time_since_update:<8.1f}s ago {total_runs:<8} {avg_time:<8.3f}s")
+    
+    
+    def _reset_since_last_report_counters(self) -> None:
+        """Reset all 'since last report' counters."""
+        self.runs_since_last_report = 0
+        self.processing_time_since_last = 0.0
+        self.runs_by_role_since_last.clear()
+        self.runs_by_agent_since_last.clear()
+        self.processing_time_by_role_since_last.clear()
+        self.processing_time_by_agent_since_last.clear()
+        
+        # Reset envelope counters
+        self.envelopes_since_last_report = 0
+    
+    def generate_final_statistics(self) -> None:
+        """Generate final statistics report on system shutdown and write to file."""
+        current_time = time.time()
+        total_uptime = current_time - self.start_time
+        
+        # Generate final report content
+        report_lines = []
+        report_lines.append("=" * 80)
+        report_lines.append("FINAL SYSTEM STATISTICS (SESSION SUMMARY)")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        # Session overview
+        report_lines.append(f"Total Session Time: {total_uptime:.1f}s ({total_uptime/60:.1f} minutes)")
+        report_lines.append(f"Total Agents: {len(self.agent_registry)}")
+        report_lines.append("")
+        
+        # Final run statistics
+        report_lines.append("FINAL RUN STATISTICS:")
+        report_lines.append(f"   Total Operations: {self.total_runs}")
+        if total_uptime > 0:
+            overall_rate = self.total_runs / total_uptime
+            report_lines.append(f"   Average Rate: {overall_rate:.2f} operations/second")
+        
+        if self.runs_by_role:
+            report_lines.append("   Operations by Role:")
+            for role in sorted(self.runs_by_role.keys()):
+                count = self.runs_by_role[role]
+                percentage = (count / self.total_runs * 100) if self.total_runs > 0 else 0
+                report_lines.append(f"      {role}: {count} ({percentage:.1f}%)")
+        report_lines.append("")
+        
+        # Final processing time statistics
+        report_lines.append("FINAL PROCESSING TIME STATISTICS:")
+        report_lines.append(f"   Total Processing Time: {self.total_processing_time:.2f}s")
+        if self.total_runs > 0:
+            avg_processing_time = self.total_processing_time / self.total_runs
+            report_lines.append(f"   Average per Operation: {avg_processing_time:.3f}s")
+        
+        if total_uptime > 0:
+            cpu_utilization = (self.total_processing_time / total_uptime) * 100
+            report_lines.append(f"   CPU Utilization: {cpu_utilization:.1f}%")
+        report_lines.append("")
+        
+        # Final envelope statistics
+        if self.total_envelopes_processed > 0:
+            report_lines.append("FINAL ENVELOPE STATISTICS:")
+            report_lines.append(f"   Total Envelopes Processed: {self.total_envelopes_processed}")
+            
+            if self.envelope_ages:
+                avg_age = sum(self.envelope_ages) / len(self.envelope_ages)
+                min_age, max_age = min(self.envelope_ages), max(self.envelope_ages)
+                report_lines.append(f"   Average Envelope Age: {avg_age:.2f}s (range: {min_age:.2f}s - {max_age:.2f}s)")
+            
+            if self.envelope_processing_times:
+                avg_proc_time = sum(self.envelope_processing_times) / len(self.envelope_processing_times)
+                min_proc_time, max_proc_time = min(self.envelope_processing_times), max(self.envelope_processing_times)
+                report_lines.append(f"   Average Processing Time: {avg_proc_time:.2f}s (range: {min_proc_time:.2f}s - {max_proc_time:.2f}s)")
+            
+            if self.envelope_process_counts:
+                avg_steps = sum(self.envelope_process_counts) / len(self.envelope_process_counts)
+                min_steps, max_steps = min(self.envelope_process_counts), max(self.envelope_process_counts)
+                report_lines.append(f"   Average Process Steps: {avg_steps:.1f} (range: {min_steps} - {max_steps})")
+            report_lines.append("")
+        
+        # Agent performance summary
+        if self.agent_registry:
+            report_lines.append("AGENT PERFORMANCE SUMMARY:")
+            report_lines.append(f"   {'Agent ID':<20} {'Role':<12} {'Operations':<12} {'Total Time':<12} {'Avg Time':<10}")
+            report_lines.append(f"   {'-'*20} {'-'*12} {'-'*12} {'-'*12} {'-'*10}")
+            
+            for agent_id, info in sorted(self.agent_registry.items()):
+                role = info['role']
+                total_runs = info['total_runs']
+                total_time = info['total_time']
+                avg_time = total_time / total_runs if total_runs > 0 else 0
+                
+                report_lines.append(f"   {agent_id:<20} {role:<12} {total_runs:<12} {total_time:<8.2f}s {avg_time:<8.3f}s")
+            report_lines.append("")
+        
+        # System efficiency metrics
+        report_lines.append("SYSTEM EFFICIENCY:")
+        if total_uptime > 0 and self.total_envelopes_processed > 0:
+            envelope_rate = self.total_envelopes_processed / total_uptime
+            report_lines.append(f"   Envelope Throughput: {envelope_rate:.2f} envelopes/second")
+            
+            if self.envelope_processing_times:
+                total_envelope_time = sum(self.envelope_processing_times)
+                efficiency = (total_envelope_time / total_uptime) * 100
+                report_lines.append(f"   Processing Efficiency: {efficiency:.1f}% (time spent in actual processing)")
+        
+        report_lines.append("=" * 80)
+        report_lines.append("Session completed successfully!")
+        report_lines.append("=" * 80)
+        
+        # Write final report to file
+        try:
+            with open('agent_final_statistics.txt', 'w', encoding='utf-8') as f:
+                f.write('\n'.join(report_lines))
+        except Exception as e:
+            logger.debug(f"Failed to write final statistics report: {e}")
 
 
 _redis: Redis = Redis.from_url(REDIS_URL, decode_responses=False)
@@ -882,6 +1380,12 @@ async def _emergency_stop_runtime() -> None:
     
     logger.info(f"Emergency stopping runtime with {len(_agent_registry)} registered agents")
     
+    # Generate final statistics before emergency shutdown
+    try:
+        _generate_exit_statistics()
+    except Exception as e:
+        logger.debug(f"Error generating exit statistics during emergency cleanup: {e}")
+    
     # Stop all agents with shorter timeout for emergency cleanup
     for agent in _agent_registry:
         try:
@@ -910,6 +1414,12 @@ def _sync_cleanup() -> None:
     global _runtime_started
     
     logger.info("Performing synchronous cleanup (normal during program exit)")
+    
+    # Generate final statistics before sync cleanup
+    try:
+        _generate_exit_statistics()
+    except Exception as e:
+        logger.debug(f"Error generating exit statistics during sync cleanup: {e}")
     
     # Set shutdown flags on all agents (safe during interpreter shutdown)
     for agent in _agent_registry:
@@ -1020,6 +1530,23 @@ async def start_runtime() -> None:
     _runtime_started = True
     logger.info("Runtime started successfully")
 
+def _generate_exit_statistics() -> None:
+    """Generate final statistics from StatsAgent if available."""
+    try:
+        # Find the StatsAgent in the registry
+        stats_agent = None
+        for agent in _agent_registry:
+            if isinstance(agent, StatsAgent):
+                stats_agent = agent
+                break
+        
+        if stats_agent:
+            stats_agent.generate_final_statistics()
+        else:
+            logger.info("No StatsAgent found - skipping final statistics")
+    except Exception as e:
+        logger.debug(f"Error generating final statistics: {e}")
+
 async def stop_runtime() -> None:
     """Graceful shutdown of all registered agents and Redis connection."""
     global _runtime_started
@@ -1027,6 +1554,10 @@ async def stop_runtime() -> None:
         return
     
     logger.info(f"Stopping runtime with {len(_agent_registry)} registered agents")
+    
+    # Generate final statistics before stopping agents
+    _generate_exit_statistics()
+    
     for agent in _agent_registry:
         logger.info(f"Stopping {agent.role} agent {agent.agent_id}")
         await agent.stop()
@@ -1078,7 +1609,7 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
         sender_agent_id="process_request",
         kind="task",
         payload=payload,
-        ts=current_time,
+        update_ts=current_time,
         result_list=result_list,
         trace=[],
         # Initialize safety attributes
