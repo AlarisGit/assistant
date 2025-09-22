@@ -9,4 +9,70 @@ _old/
 __pycache__
 .DS_Store
 
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+venv3.13/
+ENV/
+env/
+.venv/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+agent_statistics.txt
+agent_final_statistics.txt
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Redis dumps
+dump.rdb
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Project configuration (KEEP THESE - they sync across computers)
+# .windsurf/ directory should be tracked for project sync
+!.windsurf/
+
 
