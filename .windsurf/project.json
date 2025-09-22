@@ -1,0 +1,66 @@
+{
+  "project_name": "Alaris Assistant",
+  "version": "1.0.0",
+  "description": "Production-grade agentic system with Redis Streams and distributed memory",
+  
+  "project_structure": {
+    "src/": "Production source code - agent.py, assistant.py, llm.py, etc.",
+    "tests/": "Test suites and scripts - test_*.py files",
+    "examples/": "Demonstration scripts - *_demo.py files", 
+    "docs/": "Documentation and guides - *.md files",
+    "cache/": "Cache directory (gitignored)",
+    "log/": "Log files (gitignored)",
+    "data/": "Data files (gitignored)"
+  },
+  
+  "coding_standards": {
+    "python_version": "3.13",
+    "line_length": 88,
+    "import_style": "absolute",
+    "docstring_style": "google",
+    "async_patterns": "preferred for all agents"
+  },
+  
+  "architecture_decisions": {
+    "communication": "Redis Streams with consumer groups",
+    "agent_base": "BaseAgent class for all agents",
+    "memory_system": "Distributed conversation-scoped with TTL",
+    "design_pattern": "Stateless agents with distributed context",
+    "safety_systems": "Circuit breakers, process limits, comprehensive tracing"
+  },
+  
+  "ai_assistant_agreements": {
+    "security_rules": [
+      "NEVER access .env files - contains secrets/passwords",
+      "Use Python script workaround for gitignored files",
+      "Always clean up temporary files after use",
+      "Respect privacy and data security boundaries"
+    ],
+    "development_patterns": [
+      "Follow clean directory structure (src/, tests/, examples/, docs/)",
+      "Use distributed memory system for conversation context",
+      "Implement proper cleanup methods (partial vs full)",
+      "Maintain comprehensive documentation"
+    ],
+    "project_focus": [
+      "Agentic system development with Redis Streams",
+      "Distributed memory system optimization", 
+      "SMS assistant pipeline development",
+      "Production-grade reliability and monitoring"
+    ]
+  },
+  
+  "git_workflow": {
+    "main_branch": "main",
+    "gitignore_strategy": "Exclude runtime files, keep source code",
+    "commit_style": "Conventional commits preferred",
+    "sync_strategy": "Project config files committed to Git"
+  },
+  
+  "development_environment": {
+    "virtual_env": "venv3.13/",
+    "requirements_file": "requirements.txt",
+    "redis_required": true,
+    "python_path_setup": "Add src/ to path for imports"
+  }
+}
