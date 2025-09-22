@@ -133,7 +133,7 @@ REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))  # Pool si
 REDIS_RETRY_ON_TIMEOUT = os.getenv("REDIS_RETRY_ON_TIMEOUT", "true").lower() == "true"
 REDIS_RETRY_ON_ERROR = os.getenv("REDIS_RETRY_ON_ERROR", "true").lower() == "true"
 REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "3"))
-REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0"))  # seconds
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "70.0"))  # seconds - must be > ASSISTANT_TIMEOUT
 REDIS_SOCKET_CONNECT_TIMEOUT = float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0"))  # seconds
 REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))  # seconds
 
@@ -145,6 +145,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
+
+ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 60))
 
 VERSION = os.getenv("VERSION", "1.0.1")
 

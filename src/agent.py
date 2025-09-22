@@ -381,6 +381,355 @@ class Envelope:
     def __str__(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
 
+# -------------------------- Distributed Memory Subsystem --------------------------
+
+class ConversationMemory:
+    """
+    Distributed conversation memory with dict/list-like interface backed by Redis.
+    
+    Provides seamless access to conversation-scoped data across processes and hosts.
+    All operations are atomic and support JSON-serializable data types.
+    
+    Usage:
+        memory = ConversationMemory(redis, "conv_123")
+        
+        # Dict-like operations
+        memory["user_preferences"] = {"language": "en", "style": "detailed"}
+        prefs = memory["user_preferences"]
+        
+        # List operations for conversation history
+        memory.append("messages", {"role": "user", "content": "Hello"})
+        history = memory.get_list("messages")
+        
+        # Automatic cleanup with TTL
+        memory.set_ttl(3600)  # 1 hour
+    """
+    
+    def __init__(self, redis: Redis, conversation_id: str, default_ttl: int = 3600):
+        self.redis = redis
+        self.conversation_id = conversation_id
+        self.default_ttl = default_ttl
+        self._prefix = f"memory:conv:{conversation_id}"
+    
+    def _key(self, field: str) -> str:
+        """Generate Redis key for a memory field."""
+        return f"{self._prefix}:{field}"
+    
+    async def __getitem__(self, field: str) -> Any:
+        """Get a value from memory (dict-like access)."""
+        key = self._key(field)
+        value = await self.redis.get(key)
+        if value is None:
+            raise KeyError(f"Memory field '{field}' not found for conversation {self.conversation_id}")
+        return json.loads(value.decode('utf-8'))
+    
+    async def __setitem__(self, field: str, value: Any) -> None:
+        """Set a value in memory (dict-like access)."""
+        key = self._key(field)
+        serialized = json.dumps(value, ensure_ascii=False)
+        await self.redis.setex(key, self.default_ttl, serialized)
+    
+    async def __delitem__(self, field: str) -> None:
+        """Delete a field from memory."""
+        key = self._key(field)
+        deleted = await self.redis.delete(key)
+        if deleted == 0:
+            raise KeyError(f"Memory field '{field}' not found for conversation {self.conversation_id}")
+    
+    async def __contains__(self, field: str) -> bool:
+        """Check if a field exists in memory."""
+        key = self._key(field)
+        return await self.redis.exists(key) > 0
+    
+    async def get(self, field: str, default: Any = None) -> Any:
+        """Get a value with default fallback (dict-like)."""
+        try:
+            return await self[field]
+        except KeyError:
+            return default
+    
+    async def set(self, field: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Set a value with optional custom TTL."""
+        key = self._key(field)
+        serialized = json.dumps(value, ensure_ascii=False)
+        ttl_to_use = ttl if ttl is not None else self.default_ttl
+        await self.redis.setex(key, ttl_to_use, serialized)
+    
+    async def update(self, data: Dict[str, Any]) -> None:
+        """Update multiple fields at once (dict-like)."""
+        pipe = self.redis.pipeline()
+        for field, value in data.items():
+            key = self._key(field)
+            serialized = json.dumps(value, ensure_ascii=False)
+            pipe.setex(key, self.default_ttl, serialized)
+        await pipe.execute()
+    
+    async def keys(self) -> List[str]:
+        """Get all field names in this conversation memory."""
+        pattern = f"{self._prefix}:*"
+        keys = await self.redis.keys(pattern)
+        # Extract field names by removing prefix
+        prefix_len = len(self._prefix) + 1  # +1 for the colon
+        return [key.decode('utf-8')[prefix_len:] for key in keys]
+    
+    async def items(self) -> List[tuple]:
+        """Get all field-value pairs (dict-like)."""
+        fields = await self.keys()
+        items = []
+        for field in fields:
+            try:
+                value = await self[field]
+                items.append((field, value))
+            except KeyError:
+                # Field might have been deleted between keys() and get
+                continue
+        return items
+    
+    # List operations for conversation history and similar use cases
+    
+    async def append(self, field: str, item: Any) -> None:
+        """Append an item to a list field."""
+        current_list = await self.get_list(field)
+        current_list.append(item)
+        await self.set(field, current_list)
+    
+    async def extend(self, field: str, items: List[Any]) -> None:
+        """Extend a list field with multiple items."""
+        current_list = await self.get_list(field)
+        current_list.extend(items)
+        await self.set(field, current_list)
+    
+    async def get_list(self, field: str, default: Optional[List[Any]] = None) -> List[Any]:
+        """Get a list field, returning empty list if not found."""
+        if default is None:
+            default = []
+        try:
+            value = await self[field]
+            return value if isinstance(value, list) else default
+        except KeyError:
+            return default
+    
+    async def pop(self, field: str, index: int = -1) -> Any:
+        """Remove and return an item from a list field."""
+        current_list = await self.get_list(field)
+        if not current_list:
+            raise IndexError(f"pop from empty list in field '{field}'")
+        item = current_list.pop(index)
+        await self.set(field, current_list)
+        return item
+    
+    async def insert(self, field: str, index: int, item: Any) -> None:
+        """Insert an item at a specific position in a list field."""
+        current_list = await self.get_list(field)
+        current_list.insert(index, item)
+        await self.set(field, current_list)
+    
+    async def remove(self, field: str, item: Any) -> None:
+        """Remove first occurrence of an item from a list field."""
+        current_list = await self.get_list(field)
+        current_list.remove(item)  # Raises ValueError if not found
+        await self.set(field, current_list)
+    
+    async def list_length(self, field: str) -> int:
+        """Get the length of a list field."""
+        current_list = await self.get_list(field)
+        return len(current_list)
+    
+    # Conversation history specific methods
+    
+    async def add_message(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Add a message to conversation history."""
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+            "metadata": metadata or {}
+        }
+        await self.append("messages", message)
+    
+    async def get_messages(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get conversation messages, optionally limited to recent N messages."""
+        messages = await self.get_list("messages")
+        if limit is not None and len(messages) > limit:
+            return messages[-limit:]
+        return messages
+    
+    async def clear_messages(self) -> None:
+        """Clear all conversation messages."""
+        await self.set("messages", [])
+    
+    async def get_message_count(self) -> int:
+        """Get the number of messages in conversation history."""
+        return await self.list_length("messages")
+    
+    # Utility methods
+    
+    async def set_ttl(self, ttl: int) -> None:
+        """Update TTL for all fields in this conversation."""
+        fields = await self.keys()
+        pipe = self.redis.pipeline()
+        for field in fields:
+            key = self._key(field)
+            pipe.expire(key, ttl)
+        await pipe.execute()
+    
+    async def clear_all(self) -> None:
+        """Delete all memory for this conversation."""
+        pattern = f"{self._prefix}:*"
+        keys = await self.redis.keys(pattern)
+        if keys:
+            await self.redis.delete(*keys)
+    
+    async def get_memory_size(self) -> Dict[str, Any]:
+        """Get memory usage statistics for this conversation."""
+        fields = await self.keys()
+        total_keys = len(fields)
+        total_size = 0
+        
+        for field in fields:
+            key = self._key(field)
+            try:
+                size = await self.redis.memory_usage(key)
+                if size:
+                    total_size += size
+            except Exception:
+                # memory_usage might not be available in all Redis versions
+                pass
+        
+        return {
+            "conversation_id": self.conversation_id,
+            "total_fields": total_keys,
+            "total_size_bytes": total_size,
+            "fields": fields
+        }
+
+
+class MemoryManager:
+    """
+    Global memory manager for conversation-scoped distributed memory.
+    
+    Provides factory methods and cleanup utilities for ConversationMemory instances.
+    Integrates with BaseAgent to provide seamless memory access.
+    """
+    
+    def __init__(self, redis: Redis, default_ttl: int = 3600):
+        self.redis = redis
+        self.default_ttl = default_ttl
+        self._memory_cache: Dict[str, ConversationMemory] = {}
+    
+    def get_memory(self, conversation_id: str, ttl: Optional[int] = None) -> ConversationMemory:
+        """Get or create ConversationMemory for a conversation."""
+        if conversation_id not in self._memory_cache:
+            memory_ttl = ttl if ttl is not None else self.default_ttl
+            self._memory_cache[conversation_id] = ConversationMemory(
+                self.redis, conversation_id, memory_ttl
+            )
+        return self._memory_cache[conversation_id]
+    
+    async def cleanup_conversation(self, conversation_id: str) -> None:
+        """Clean up memory for a specific conversation.
+        
+        Works across distributed agents - any agent can clean up any conversation.
+        """
+        # Get memory instance (creates if not in cache) - works for any agent
+        memory = self.get_memory(conversation_id)
+        await memory.clear_all()
+        
+        # Remove from local cache if present
+        if conversation_id in self._memory_cache:
+            del self._memory_cache[conversation_id]
+            
+    async def cleanup_messages(self, conversation_id: str) -> None:
+        """Clean up message history for a specific conversation."""
+        # Get memory instance (creates if not in cache)
+        memory = self.get_memory(conversation_id)
+        await memory.clear_messages()
+    
+    async def cleanup_expired_conversations(self, max_age_seconds: int = 86400) -> int:
+        """Clean up conversations older than max_age_seconds. Returns count of cleaned conversations."""
+        pattern = "memory:conv:*"
+        keys = await self.redis.keys(pattern)
+        
+        current_time = time.time()
+        cleaned_count = 0
+        
+        # Group keys by conversation_id
+        conversations = {}
+        for key in keys:
+            key_str = key.decode('utf-8')
+            # Extract conversation_id from key like "memory:conv:conv_123:field_name"
+            parts = key_str.split(':')
+            if len(parts) >= 3:
+                conv_id = parts[2]
+                if conv_id not in conversations:
+                    conversations[conv_id] = []
+                conversations[conv_id].append(key)
+        
+        # Check each conversation for expiry
+        for conv_id, conv_keys in conversations.items():
+            # Check if any key in this conversation is expired
+            should_cleanup = False
+            for key in conv_keys:
+                ttl = await self.redis.ttl(key)
+                if ttl == -2:  # Key doesn't exist (expired)
+                    should_cleanup = True
+                    break
+                elif ttl > 0:
+                    # Calculate age from TTL
+                    age = self.default_ttl - ttl
+                    if age > max_age_seconds:
+                        should_cleanup = True
+                        break
+            
+            if should_cleanup:
+                await self.cleanup_conversation(conv_id)
+                cleaned_count += 1
+        
+        return cleaned_count
+    
+    async def get_all_conversations(self) -> List[str]:
+        """Get list of all conversation IDs with active memory."""
+        pattern = "memory:conv:*"
+        keys = await self.redis.keys(pattern)
+        
+        conversations = set()
+        for key in keys:
+            key_str = key.decode('utf-8')
+            parts = key_str.split(':')
+            if len(parts) >= 3:
+                conversations.add(parts[2])
+        
+        return list(conversations)
+    
+    async def get_memory_stats(self) -> Dict[str, Any]:
+        """Get overall memory usage statistics."""
+        conversations = await self.get_all_conversations()
+        total_conversations = len(conversations)
+        
+        stats = {
+            "total_conversations": total_conversations,
+            "conversations": []
+        }
+        
+        for conv_id in conversations:
+            memory = self.get_memory(conv_id)
+            conv_stats = await memory.get_memory_size()
+            stats["conversations"].append(conv_stats)
+        
+        return stats
+
+
+# Global memory manager instance
+_memory_manager: Optional[MemoryManager] = None
+
+async def get_memory_manager() -> MemoryManager:
+    """Get the global memory manager instance."""
+    global _memory_manager
+    if _memory_manager is None:
+        redis = await get_redis()
+        _memory_manager = MemoryManager(redis)
+    return _memory_manager
+
 # -------------------------- Safety Functions --------------------------
 
 def check_safety_limits(env: Envelope) -> Optional[str]:
@@ -547,6 +896,52 @@ class BaseAgent:
     async def process(self, env: Envelope) -> Envelope:
         """Override in subclasses. Return updated envelope."""
         raise NotImplementedError("BaseAgent.process must be overridden")
+
+    # ---- distributed memory interface ----
+
+    async def get_memory(self, conversation_id: str) -> ConversationMemory:
+        """Get conversation memory for the given conversation ID.
+        
+        Provides dict/list-like interface for storing conversation-scoped data
+        that persists across agents and processes.
+        
+        Usage:
+            memory = await self.get_memory(env.conversation_id)
+            
+            # Dict-like operations
+            await memory.set("user_preferences", {"language": "en"})
+            prefs = await memory.get("user_preferences", {})
+            
+            # List operations for conversation history
+            await memory.add_message("user", "Hello")
+            messages = await memory.get_messages(limit=10)
+        """
+        manager = await get_memory_manager()
+        return manager.get_memory(conversation_id)
+    
+    async def cleanup_memory(self, conversation_id: str) -> None:
+        """Clean up all memory for a conversation.
+        
+        Use this when a conversation need to be completely reset including history and any other context items.
+        """
+        manager = await get_memory_manager()
+        await manager.cleanup_conversation(conversation_id)
+
+    async def cleanup_message_history(self, conversation_id: str) -> None:
+        """Clean up only message history for a conversation.
+        
+        Use this when a conversation is complete or needs to be reset.
+        The method only wipes message history keeping all other context items intact.
+        """
+        manager = await get_memory_manager()
+        await manager.cleanup_messages(conversation_id)
+
+    
+    
+    async def get_memory_stats(self) -> Dict[str, Any]:
+        """Get memory usage statistics across all conversations."""
+        manager = await get_memory_manager()
+        return await manager.get_memory_stats()
 
     # ---- loops ----
 
@@ -1763,7 +2158,7 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     
     try:
         # Create tasks for both result waiting and shutdown detection
-        result_task = asyncio.create_task(redis.brpop(result_list, timeout=10))
+        result_task = asyncio.create_task(redis.brpop(result_list, timeout=config.ASSISTANT_TIMEOUT))
         shutdown_event = _get_shutdown_event()
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         
