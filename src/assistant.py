@@ -101,7 +101,9 @@ class ManagerAgent(BaseAgent):
             # Save user message to conversation history
             user_text = env.payload.get("text", "")
             messages = await memory.get_messages(limit=10)
-            logger.info(f"Message history: {json.dumps(messages, ensure_ascii=False, indent=4)}")
+            for i, message in enumerate(messages):
+                await self.log(env.conversation_id, f"History item {i}: {message}")
+            logger.info(f"History: {json.dumps(messages, ensure_ascii=False, indent=4)}")
             await memory.add_message("user", user_text, {"message_id": env.message_id})
             
             # Initialize user preferences if not exists
