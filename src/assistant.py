@@ -7,6 +7,8 @@ import json
 
 import config
 from agent import process_request, broadcast_command, BaseAgent, Envelope
+import llm
+import util
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +111,6 @@ class ManagerAgent(BaseAgent):
             # Initialize user preferences if not exists
             user_prefs = await memory.get("user_preferences", { 
                 "language": "auto",
-                "response_style": "detailed",
                 "message_count": 0
             })
             
@@ -121,11 +122,11 @@ class ManagerAgent(BaseAgent):
             
             # Custom logging: Log memory state and routing decision
             await self.log(env.conversation_id, f"Memory updated: msg_count={user_prefs['message_count']} lang={user_prefs.get('language')} style={user_prefs.get('response_style')}")
-            await self.log(env.conversation_id, f"Routing decision: start->uppercase (text_length={len(user_text)} chars)")
+            await self.log(env.conversation_id, f"Routing decision: start->detectlanguage (text_length={len(user_text)} chars)")
             
-            env.target_role = "uppercase"
-            env.payload["stage"] = "upper"
-            logger.info(f"[ManagerAgent] Sending task to uppercase")
+            env.target_role = "detectlanguage"
+            env.payload["stage"] = "detect_language"
+            logger.info(f"[ManagerAgent] Sending task to detectlanguage")
             return env
         
         if env.kind == "result" and stage == "upper":
@@ -139,10 +140,10 @@ class ManagerAgent(BaseAgent):
             logger.info(f"[ManagerAgent] Sending task to reverse")
             return env
         
-        if env.kind == "result" and stage == "reverse":
+        if env.kind == "result" and stage == "detect_language":
             # Save assistant response to conversation history
-            assistant_text = env.payload.get("text", "")
-            await memory.add_message("assistant", assistant_text, {"message_id": env.message_id})
+            env.payload['text'] = f"Detected language: {env.payload.get("language", "en")}"
+            await memory.add_message("assistant", env.payload['text'], {"message_id": env.message_id})
             
             # Get conversation stats
             message_count = await memory.get_message_count()
@@ -158,7 +159,7 @@ class ManagerAgent(BaseAgent):
             }
             
             # Custom logging: Log final pipeline completion with stats
-            await self.log(env.conversation_id, f"Pipeline complete: final_length={len(assistant_text)} chars total_messages={message_count}")
+            await self.log(env.conversation_id, f"Pipeline complete: final_length={len(env.payload.get("text", ""))} chars total_messages={message_count}")
             await self.log(env.conversation_id, f"Conversation stats: {json.dumps(env.payload['conversation_stats'], ensure_ascii=False)}")
             
             logger.info(f"[ManagerAgent] Final result ready: {env}")
@@ -263,8 +264,42 @@ class ReverseAgent(BaseAgent):
         logger.info(f"[ReverseAgent] Outgoing: {env}")
         return env
 
+class DetectLanguageAgent(BaseAgent):
+    async def process(self, env: Envelope) -> Envelope:
+        text = env.payload.get("text", "")
+        await self.log(env.conversation_id, f"Processing text: {text}")
+        memory = await self.get_memory(env.conversation_id)
+        lang = 'en'
+        messages = await memory.get_messages(limit=6)
+        for message in messages:
+            await self.log(env.conversation_id, f"Message: {message}")
+            if message.get("role") == "user":
+                text = message.get("content", "")
+                if util._contains_cyrillic(text):
+                    await self.log(env.conversation_id, f"Detected Cyrillic in message: {text}")
+                    lang = 'ru'
+                    break
+                elif util._contains_chinese(text):
+                    await self.log(env.conversation_id, f"Detected Chinese in message: {text}")
+                    lang = 'zh'
+                    break
+        await memory.set("language", lang)
+        env.payload["language"] = lang
+        await self.log(env.conversation_id, f"Detected language: {lang}")
+        env.kind = "result"
+ 
+        return env
+
+class TranslationAgent(BaseAgent):
+    async def process(self, env: Envelope) -> Envelope:
+        return env
+    
+
+
 # Create default agent instances - they will auto-register via BaseAgent.__init__
 _manager = ManagerAgent()
+_detect_language = DetectLanguageAgent()
+_translate = TranslationAgent()
 _upper = UppercaseAgent()
 _reverse = ReverseAgent()
 

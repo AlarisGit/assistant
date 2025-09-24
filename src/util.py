@@ -4,6 +4,7 @@ import socket
 
 import config
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -27,6 +28,19 @@ def get_hostname():
 
 def get_pid():
     return os.getpid()
+
+def _contains_cyrillic(text: str) -> bool:
+    """Check if text contains Cyrillic characters."""
+    cyrillic_pattern = r'[\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F]'
+    import re
+    return bool(re.search(cyrillic_pattern, text))
+
+def _contains_chinese(text: str) -> bool:
+    """Check if text contains Chinese (CJK) characters."""
+    # CJK Unified Ideographs and common Chinese punctuation
+    chinese_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3000-\u303f]'
+    import re
+    return bool(re.search(chinese_pattern, text))
 
 if __name__ == '__main__':
     print(get_hostname())

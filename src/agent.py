@@ -1142,26 +1142,43 @@ class BaseAgent:
         pubsub = self.redis.pubsub()
         await pubsub.subscribe(BROADCAST_ALL, role_broadcast_channel(self.role))
         try:
-            async for msg in pubsub.listen():
-                if msg is None or msg.get("type") != "message":
-                    continue
+            while not self._stop.is_set():
                 try:
-                    data = json.loads(msg["data"].decode("utf-8"))
-                    await self.process_data(data)
-                except Exception:
-                    continue
+                    # Use get_message with timeout to avoid blocking indefinitely
+                    msg = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=True), timeout=1.0)
+                    if msg is None or msg.get("type") != "message":
+                        continue
+                    
+                    try:
+                        data = json.loads(msg["data"].decode("utf-8"))
+                        await self.process_data(data)
+                    except Exception:
+                        continue
 
-                cmd = data.get("cmd")
-                if cmd == "shutdown":
-                    self._shutdown_requested = True
-                    self._stop.set()
-                elif cmd == "reload":
-                    await self._publish_status("reload")
+                    cmd = data.get("cmd")
+                    if cmd == "shutdown":
+                        self._shutdown_requested = True
+                        self._stop.set()
+                    elif cmd == "reload":
+                        await self._publish_status("reload")
+                        
+                except asyncio.TimeoutError:
+                    # Timeout is expected - just check stop flag and continue
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.debug(f"Error in broadcast loop: {e}")
+                    await asyncio.sleep(0.1)
+                    
         except asyncio.CancelledError:
             pass
         finally:
-            await pubsub.unsubscribe(BROADCAST_ALL, role_broadcast_channel(self.role))
-            await pubsub.aclose()
+            try:
+                await pubsub.unsubscribe(BROADCAST_ALL, role_broadcast_channel(self.role))
+                await pubsub.aclose()
+            except Exception as e:
+                logger.debug(f"Error closing pubsub in broadcast loop: {e}")
 
     async def _heartbeat_loop(self) -> None:
         """Periodic heartbeat to role 'stat'."""
@@ -1192,6 +1209,10 @@ class BaseAgent:
                 logger.warning(f"[{self.role}:{self.agent_id}] Safety limit violated: {safety_error}")
                 await self.log_envelope(env, "safety_violation", safety_error)
                 error_env = create_safety_error(env, safety_error, self.role, self.agent_id)
+                
+                # Set target_role and target_agent_id to None to drop the envelope
+                error_env.target_role = None
+                error_env.target_agent_id = None
                 
                 # Send error back to result_list if specified, otherwise drop
                 if error_env.result_list:
