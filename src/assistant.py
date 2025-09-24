@@ -42,6 +42,9 @@ class ManagerAgent(BaseAgent):
         # Check if this is a special action
         action = env.payload.get("action")
         
+        # Custom logging: Log pipeline decision making
+        await self.log(env.conversation_id, f"Pipeline decision: stage='{stage}' kind='{env.kind}' action='{action}'")
+        
         if action == "clear_history":
             # Clear message history only, keep other memory intact
             await self.cleanup_message_history(env.conversation_id)
@@ -114,12 +117,20 @@ class ManagerAgent(BaseAgent):
             
             logger.info(f"[ManagerAgent] Saved user message to memory. Total messages: {user_prefs['message_count']}")
             
+            # Custom logging: Log memory state and routing decision
+            await self.log(env.conversation_id, f"Memory updated: msg_count={user_prefs['message_count']} lang={user_prefs.get('language')} style={user_prefs.get('response_style')}")
+            await self.log(env.conversation_id, f"Routing decision: start->uppercase (text_length={len(user_text)} chars)")
+            
             env.target_role = "uppercase"
             env.payload["stage"] = "upper"
             logger.info(f"[ManagerAgent] Sending task to uppercase")
             return env
         
         if env.kind == "result" and stage == "upper":
+            # Custom logging: Log intermediate processing result
+            processed_text = env.payload.get("text", "")
+            await self.log(env.conversation_id, f"Routing decision: upper->reverse (processed_length={len(processed_text)} chars)")
+            
             env.kind = "task"
             env.target_role = "reverse"
             env.payload["stage"] = "reverse"
@@ -143,6 +154,10 @@ class ManagerAgent(BaseAgent):
                 "message_count": message_count,
                 "user_preferences": user_prefs
             }
+            
+            # Custom logging: Log final pipeline completion with stats
+            await self.log(env.conversation_id, f"Pipeline complete: final_length={len(assistant_text)} chars total_messages={message_count}")
+            await self.log(env.conversation_id, f"Conversation stats: {json.dumps(env.payload['conversation_stats'], ensure_ascii=False)}")
             
             logger.info(f"[ManagerAgent] Final result ready: {env}")
             if env.result_list:
@@ -188,11 +203,20 @@ class UppercaseAgent(BaseAgent):
         text = env.payload.get("text", "")
         processed_text = text.upper()
         
+        # Custom logging: Log text analysis before processing
+        word_count = len(text.split())
+        has_special_chars = any(not c.isalnum() and not c.isspace() for c in text)
+        await self.log(env.conversation_id, f"Text analysis: chars={len(text)} words={word_count} special_chars={has_special_chars}")
+        
         # Update statistics
         stats["processed_count"] += 1
         stats["total_chars"] += len(text)
         stats["last_processed"] = time.time()
         await memory.set("uppercase_stats", stats)
+        
+        # Custom logging: Log processing stats and transformation
+        await self.log(env.conversation_id, f"Processing stats: session_count={stats['processed_count']} session_chars={stats['total_chars']}")
+        await self.log(env.conversation_id, f"Transformation: '{text[:30]}{'...' if len(text) > 30 else ''}' -> '{processed_text[:30]}{'...' if len(processed_text) > 30 else ''}'")
         
         env.payload["text"] = processed_text
         env.kind = "result"
@@ -216,8 +240,23 @@ class ReverseAgent(BaseAgent):
         Logs processing details for debugging.
         """
         text = env.payload.get("text", "")
-        env.payload["text"] = text[::-1]
+        
+        # Custom logging: Log text characteristics and reversal analysis
+        is_palindrome = text.lower().replace(" ", "") == text.lower().replace(" ", "")[::-1]
+        vowel_count = sum(1 for c in text.lower() if c in 'aeiou')
+        consonant_count = sum(1 for c in text.lower() if c.isalpha() and c not in 'aeiou')
+        await self.log(env.conversation_id, f"Text characteristics: palindrome={is_palindrome} vowels={vowel_count} consonants={consonant_count}")
+        
+        reversed_text = text[::-1]
+        env.payload["text"] = reversed_text
         env.kind = "result"
+        
+        # Custom logging: Log reversal result with pattern analysis
+        starts_with_space = reversed_text.startswith(' ')
+        ends_with_space = reversed_text.endswith(' ')
+        await self.log(env.conversation_id, f"Reversal complete: starts_space={starts_with_space} ends_space={ends_with_space}")
+        await self.log(env.conversation_id, f"Final result: '{text[:20]}{'...' if len(text) > 20 else ''}' -> '{reversed_text[:20]}{'...' if len(reversed_text) > 20 else ''}'")
+        
         logger.info(f"[ReverseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
         logger.info(f"[ReverseAgent] Outgoing: {env}")
         return env

@@ -234,6 +234,7 @@ import time
 from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Optional, List
 from datetime import datetime
+from pathlib import Path
 
 from redis.asyncio import Redis, ConnectionPool
 from redis.exceptions import ResponseError, ConnectionError, TimeoutError
@@ -447,6 +448,19 @@ class ConversationMemory:
             return await self[field]
         except KeyError:
             return default
+    
+    async def delete(self, field: str) -> bool:
+        """Delete a field from memory.
+        
+        Args:
+            field: The field name to delete
+            
+        Returns:
+            bool: True if field was deleted, False if it didn't exist
+        """
+        key = self._key(field)
+        deleted = await self.redis.delete(key)
+        return deleted > 0
     
     async def set(self, field: str, value: Any, ttl: Optional[int] = None) -> None:
         """Set a value with optional custom TTL."""
@@ -942,6 +956,98 @@ class BaseAgent:
         """Get memory usage statistics across all conversations."""
         manager = await get_memory_manager()
         return await manager.get_memory_stats()
+    
+    # ---- conversation-specific logging ----
+
+    async def _get_start_ts(self, conversation_id: str) -> float:
+        """Get the start timestamp for a conversation from distributed memory."""
+        memory = await self.get_memory(conversation_id)
+        start_ts = await memory.get("start_ts")
+        if start_ts is None:
+            # This is the initial request - store the start timestamp
+            start_ts = time.time()
+            await memory.set("start_ts", start_ts)
+        return start_ts
+        
+    async def _clear_start_ts(self, conversation_id: str) -> None:
+        """Clear the start timestamp for a conversation from distributed memory."""
+        memory = await self.get_memory(conversation_id)
+        # Use proper delete method - returns True if deleted, False if didn't exist
+        deleted = await memory.delete("start_ts")
+        logger.debug(f"Cleared start_ts for conversation {conversation_id}: deleted={deleted}")
+    
+    async def _get_conversation_log_path(self, conversation_id: str) -> tuple[Path, float]:
+        """Get the path for conversation-specific log file and start timestamp.
+        
+        Returns:
+            tuple: (log_path, start_ts) where start_ts is retrieved from or stored in memory
+        """
+        # Get or create conversation start timestamp from distributed memory
+        start_ts = await self._get_start_ts(conversation_id)
+        
+        # Format: CONFIG.LOG_DIR/conversations/conversation_id/start_timestamp.log
+        conversations_dir = Path(config.LOG_DIR) / "conversations" / conversation_id
+        conversations_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Format timestamp as YYYY-MM-DD_HH-MM-SS for filename
+        start_datetime = datetime.fromtimestamp(start_ts)
+        timestamp_str = start_datetime.strftime("%Y-%m-%d_%H-%M-%S")
+        
+        return conversations_dir / f"{timestamp_str}.log", start_ts
+    
+    async def log(self, conversation_id: str, message: str) -> None:
+        """Log a message to the conversation-specific log file.
+        
+        Args:
+            conversation_id: The conversation identifier
+            message: The message to log
+        """
+        try:
+            current_ts = time.time()
+            
+            # Get log path and start timestamp from distributed memory
+            log_path, start_ts = await self._get_conversation_log_path(conversation_id)
+            relative_ts = current_ts - start_ts
+            
+            # Format timestamps
+            absolute_time = datetime.fromtimestamp(current_ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            relative_time = f"{relative_ts:.3f}"
+            
+            # Format log entry with improved alignment
+            log_entry = f"[{absolute_time}] {relative_time:>7} {self.agent_id:<10} {self.role:<10} {message}\n"
+            
+            # Append to log file
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(log_entry)
+                
+        except Exception as e:
+            # Don't let logging errors break the main flow
+            logger.debug(f"Error writing to conversation log: {e}")
+    
+    async def log_envelope(self, env: Envelope, action: str, details: str = "") -> None:
+        """Log envelope processing with standardized format.
+        
+        Args:
+            env: The envelope being processed
+            action: The action being performed (e.g., "received", "processed", "sent")
+            details: Optional additional details
+        """
+        # Create message from envelope attributes
+        message_parts = [
+            f"{action.upper()}: {env.kind} message {env.message_id}",
+            f"stage={env.payload.get('stage', 'N/A')}",
+            f"target_role={env.target_role}",
+            f"process_count={env.process_count}",
+            f"total_time={env.total_processing_time:.3f}s"
+        ]
+        
+        if details:
+            message_parts.append(details)
+            
+        message = " | ".join(message_parts)
+        
+        # Use unified log method for consistent formatting
+        await self.log(env.conversation_id, message)
 
     # ---- loops ----
 
@@ -980,6 +1086,9 @@ class BaseAgent:
                                 continue
 
                             logger.info(f"[{self.role}:{self.agent_id}] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
+                            
+                            # Log envelope reception
+                            await self.log_envelope(env, "received", f"from role stream {self._role_stream}")
 
                             await self._handle_envelope(env)
                         finally:
@@ -1015,6 +1124,9 @@ class BaseAgent:
                             if env.target_agent_id != self.agent_id:
                                 await self.redis.xack(self._agent_stream, self._agent_group, msg_id)
                                 continue
+
+                            # Log envelope reception
+                            await self.log_envelope(env, "received", f"from direct stream {self._agent_stream}")
 
                             await self._handle_envelope(env)
                         finally:
@@ -1078,14 +1190,18 @@ class BaseAgent:
             safety_error = check_safety_limits(env)
             if safety_error:
                 logger.warning(f"[{self.role}:{self.agent_id}] Safety limit violated: {safety_error}")
+                await self.log_envelope(env, "safety_violation", safety_error)
                 error_env = create_safety_error(env, safety_error, self.role, self.agent_id)
                 
                 # Send error back to result_list if specified, otherwise drop
                 if error_env.result_list:
                     logger.info(f"[{self.role}:{self.agent_id}] Sending safety error to result_list: {error_env.result_list}")
-                    await self._send_to_result_list(error_env)
+                    # Set target_list so _send() routes it correctly
+                    error_env.target_list = error_env.result_list
+                    await self._send(error_env)
                 else:
                     logger.info(f"[{self.role}:{self.agent_id}] Dropping envelope due to safety violation (no result_list)")
+                    await self.log_envelope(env, "dropped", "safety violation, no result_list")
                 return
             
             # All agents should set busy flag for proper load balancing
@@ -1111,20 +1227,23 @@ class BaseAgent:
             try:
                 timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
                 logger.info(f"Timeout: {timeout}")
+                await self.log_envelope(env, "processing_start", f"timeout={timeout}s")
                 await self._publish_status("process")
-                await asyncio.sleep(1)
                 env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
                 logger.info(f"After process: {env2}")
                 if env2 is not None:
                     env = env2
 
                 exception = None
+                await self.log_envelope(env, "processing_complete", f"success")
             except asyncio.TimeoutError:
                 exception = f"Task exceeded safety timeout: {self.task_timeout_sec}"
                 logger.error(exception)
+                await self.log_envelope(env, "processing_error", f"timeout after {self.task_timeout_sec}s")
             except Exception as e:
                 logger.error(f"[BaseAgent] Exception in process: {e}")
                 exception = repr(e)
+                await self.log_envelope(env, "processing_error", f"exception: {exception}")
                 
             trace_item['end_ts'] = time.time()
             trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
@@ -1141,6 +1260,9 @@ class BaseAgent:
             await self._report_envelope_completion(env, trace_item['duration'])
             
             logger.info(f"Outgoing: {env}")
+            
+            # Log before sending
+            await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
 
             await self._send(env)
 
@@ -1172,13 +1294,6 @@ class BaseAgent:
         except Exception as e:
             logger.debug(f"Failed to report envelope completion: {e}")
     
-    async def _send_to_result_list(self, env: Envelope) -> None:
-        """Send envelope directly to result_list for safety violations."""
-        if env.result_list:
-            env.sender_role = self.role
-            env.sender_agent_id = self.agent_id
-            env.update_ts = time.time()
-            await self.redis.lpush(env.result_list, json.dumps(asdict(env), ensure_ascii=False))
 
     async def _send(self, env: Envelope) -> None:
         """Send envelope to target destination.
@@ -1197,12 +1312,17 @@ class BaseAgent:
         if env.target_role:
             logger.info(f"[{self.role}:{self.agent_id}] Sending to role {env.target_role}: {env.message_id}")
             await xadd(self.redis, role_stream_key(env.target_role), env.to_stream_fields())
+            await self.log_envelope(env, "sent", f"to role stream {role_stream_key(env.target_role)}")
         elif env.target_agent_id:
             logger.info(f"[{self.role}:{self.agent_id}] Sending to agent {env.target_agent_id}: {env.message_id}")
             await xadd(self.redis, agent_stream_key(env.target_agent_id), env.to_stream_fields())
+            await self.log_envelope(env, "sent", f"to agent stream {agent_stream_key(env.target_agent_id)}")
         elif env.target_list:
             logger.info(f"[{self.role}:{self.agent_id}] Sending to list {env.target_list}: {env.message_id}")
             await self.redis.lpush(env.target_list, json.dumps(asdict(env), ensure_ascii=False))
+            await self.log_envelope(env, "sent", f"to result list {env.target_list}")
+            # Clear start timestamp when conversation completes (result sent to external list)
+            await self._clear_start_ts(env.conversation_id)
 
     async def _publish_status(self, event: str) -> None:
         """Publish lifecycle/status to role 'stat' broadcast channel."""
@@ -2133,8 +2253,8 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
         target_role=role,
         target_agent_id=None,
         target_list=None,
-        sender_role="external",
-        sender_agent_id="process_request",
+        sender_role="ext",
+        sender_agent_id="proc_req",
         kind="task",
         payload=payload,
         update_ts=current_time,
