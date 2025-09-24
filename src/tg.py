@@ -4,6 +4,7 @@ import asyncio
 import re
 import html
 import time
+import signal
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import NetworkError, TimedOut, RetryAfter, BadRequest
@@ -39,6 +40,33 @@ def save_telegram_users():
     with open(telegram_users_file, "w") as f:
         json.dump(telegram_users, f)
 
+# Global shutdown event for coordinated shutdown
+_global_shutdown_event = None
+
+def get_global_shutdown_event():
+    """Get or create the global shutdown event."""
+    global _global_shutdown_event
+    if _global_shutdown_event is None:
+        _global_shutdown_event = asyncio.Event()
+    return _global_shutdown_event
+
+def signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) and SIGTERM signals."""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown of Telegram bot")
+    
+    # Set the global shutdown event to stop the bot
+    try:
+        loop = asyncio.get_event_loop()
+        if not loop.is_closed():
+            shutdown_event = get_global_shutdown_event()
+            loop.call_soon_threadsafe(shutdown_event.set)
+    except RuntimeError:
+        # No event loop available, that's OK during shutdown
+        pass
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 atexit.register(save_telegram_users)
 
@@ -50,7 +78,6 @@ class TelegramBot:
         self.token = token
         self.application = Application.builder().token(token).build()
         self._setup_handlers()
-        self.shutdown_event = asyncio.Event()
         self.max_retries = 5
         self.base_delay = 1.0  # Base delay for exponential backoff
     
@@ -152,8 +179,9 @@ class TelegramBot:
         # Save users before exit
         save_telegram_users()
         
-        # Set the shutdown event to break the main loop
-        self.shutdown_event.set()
+        # Set the global shutdown event to break the main loop
+        shutdown_event = get_global_shutdown_event()
+        shutdown_event.set()
         
         # Give a moment for the message to be sent
         await asyncio.sleep(0.5)
@@ -397,7 +425,9 @@ class TelegramBot:
         """Start the bot with automatic reconnection."""
         logger.info("Starting Telegram bot...")
         
-        while not self.shutdown_event.is_set():
+        shutdown_event = get_global_shutdown_event()
+        
+        while not shutdown_event.is_set():
             try:
                 await self.application.initialize()
                 await self.application.start()
@@ -406,7 +436,7 @@ class TelegramBot:
                 logger.info("Bot is running. Waiting for shutdown event...")
                 
                 # Keep the bot running until shutdown event is set
-                await self.shutdown_event.wait()
+                await shutdown_event.wait()
                 
                 logger.info("Shutdown event received. Stopping bot...")
                 break
@@ -423,8 +453,14 @@ class TelegramBot:
                 except Exception as cleanup_error:
                     logger.error(f"Error during cleanup: {str(cleanup_error)}")
                 
-                # Wait before restarting
-                await asyncio.sleep(30)
+                # Wait before restarting, but check for shutdown
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                    logger.info("Shutdown event received during network error recovery. Exiting...")
+                    break
+                except asyncio.TimeoutError:
+                    # Timeout is expected - continue with restart
+                    pass
                 
                 # Recreate application instance
                 self.application = Application.builder().token(self.token).build()
@@ -445,7 +481,14 @@ class TelegramBot:
                 except Exception as cleanup_error:
                     logger.error(f"Error during cleanup: {str(cleanup_error)}")
                 
-                await asyncio.sleep(60)
+                # Wait before restarting, but check for shutdown
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                    logger.info("Shutdown event received during unexpected error recovery. Exiting...")
+                    break
+                except asyncio.TimeoutError:
+                    # Timeout is expected - continue with restart
+                    pass
                 
                 # Recreate application instance
                 self.application = Application.builder().token(self.token).build()
