@@ -1274,6 +1274,30 @@ class BaseAgent:
         
         logger.info(f"Outgoing: {env}")
         
+        # Check for self-loop (agent targeting itself) - immediate infinite loop prevention
+        if env.target_role == self.role and env.target_agent_id is None:
+            error_message = f"Self-loop detected: agent '{self.role}' targeting itself (infinite loop prevention)"
+            logger.error(f"[{self.role}:{self.agent_id}] {error_message}")
+            await self.log_envelope(env, "self_loop_error", error_message)
+            
+            # Create error envelope
+            error_env = create_safety_error(env, error_message, self.role, self.agent_id)
+            error_env.target_role = None
+            error_env.target_agent_id = None
+            
+            # Send error back to result_list if specified, otherwise drop
+            if error_env.result_list:
+                logger.info(f"[{self.role}:{self.agent_id}] Sending self-loop error to result_list: {error_env.result_list}")
+                error_env.target_list = error_env.result_list
+                await self._send(error_env)
+            else:
+                logger.info(f"[{self.role}:{self.agent_id}] Dropping envelope due to self-loop (no result_list)")
+                await self.log_envelope(env, "dropped", "self-loop detected, no result_list")
+            
+            await self._publish_status("idle")
+            self._busy.clear()
+            return
+        
         # Log before sending
         await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
 
