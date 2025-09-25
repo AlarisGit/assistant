@@ -73,7 +73,6 @@ TABLE OF CONTENTS
 - Envelope is the only message type in Streams; it carries:
   * Addressing: target_role, target_agent_id
   * Sender: sender_role, sender_agent_id
-  * Semantics: kind ∈ {"task", "result", "control", "status"}
   * Payload: arbitrary JSON (domain data + control flags)
   * Trace: a list of breadcrumbs for debugging
   * Timestamps: ts (float)
@@ -168,7 +167,7 @@ TABLE OF CONTENTS
 10) OBSERVABILITY
 --------------------------------------------------------------------------------
 - StatsAgent (role="stat") can listen to broadcast:role:stat for:
-    {"kind":"status","event":"init|heartbeat|reload|exit", ...}
+    {"event":"init|heartbeat|reload|exit", ...}
 - Recommended:
   * Persist heartbeats and liveness in a time-series DB (with TTL).
   * Track task_start/task_finish in trace (already appended).
@@ -198,7 +197,7 @@ C) Direct messaging to an agent (example snippet):
      Use send_direct_task() helper to push to stream:agent:{agent_id}.
 
 D) Adding a new worker:
-   - Subclass BaseAgent(role="newrole"), override process(env), and set env.kind="result".
+   - Subclass BaseAgent(role="newrole"), override process(env), and return env.
    - Have ManagerAgent route to "newrole" based on scenario.
 
 --------------------------------------------------------------------------------
@@ -341,7 +340,6 @@ class Envelope:
       sender_role:     role of the sender (for audit/debug)
       sender_agent_id: concrete agent id of the sender
 
-      kind:   "task" | "result" | "control" | "status"
       payload:arbitrary JSON (domain inputs/outputs, control flags, errors)
       update_ts: unix timestamp (last update time)
 
@@ -356,7 +354,6 @@ class Envelope:
     sender_role: str
     sender_agent_id: str
 
-    kind: str
     payload: Dict[str, Any]
     update_ts: float
 
@@ -804,8 +801,7 @@ def create_safety_error(env: Envelope, error_message: str, agent_role: str, agen
         "safety_violation": True
     })
     
-    # Mark as result to return to caller
-    env.kind = "result"
+    # Error envelope created for safety violation
     
     return env
 
@@ -845,7 +841,7 @@ class BaseAgent:
 
     Override process(env) in subclasses:
       - Do work (I/O, CPU, etc.).
-      - Set env.kind to "result" (or "task" if forwarding).
+      - Return env (modified as needed).
         env.result_list (final).
     """
 
@@ -1034,7 +1030,7 @@ class BaseAgent:
         """
         # Create message from envelope attributes
         message_parts = [
-            f"{action.upper()}: {env.kind} message {env.message_id}",
+            f"{action.upper()}: message {env.message_id}",
             f"stage={env.payload.get('stage', 'N/A')}",
             f"target_role={env.target_role}",
             f"process_count={env.process_count}",
@@ -1085,7 +1081,7 @@ class BaseAgent:
                                 await self.redis.xack(self._role_stream, self._role_group, msg_id)
                                 continue
 
-                            logger.info(f"[{self.role}:{self.agent_id}] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
+                            logger.info(f"[{self.role}:{self.agent_id}] Processing message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
                             
                             # Log envelope reception
                             await self.log_envelope(env, "received", f"from role stream {self._role_stream}")
@@ -1199,96 +1195,92 @@ class BaseAgent:
         Adds execution trace with timing and error information.
         Includes safety checks to prevent resource exhaustion.
         """
-        if env.kind == "control":
+        # Process all envelopes (no kind filtering needed)
+        # Check safety limits before processing
+        safety_error = check_safety_limits(env)
+        if safety_error:
+            logger.warning(f"[{self.role}:{self.agent_id}] Safety limit violated: {safety_error}")
+            await self.log_envelope(env, "safety_violation", safety_error)
+            error_env = create_safety_error(env, safety_error, self.role, self.agent_id)
+            
+            # Set target_role and target_agent_id to None to drop the envelope
+            error_env.target_role = None
+            error_env.target_agent_id = None
+            
+            # Send error back to result_list if specified, otherwise drop
+            if error_env.result_list:
+                logger.info(f"[{self.role}:{self.agent_id}] Sending safety error to result_list: {error_env.result_list}")
+                # Set target_list so _send() routes it correctly
+                error_env.target_list = error_env.result_list
+                await self._send(error_env)
+            else:
+                logger.info(f"[{self.role}:{self.agent_id}] Dropping envelope due to safety violation (no result_list)")
+                await self.log_envelope(env, "dropped", "safety violation, no result_list")
             return
+        
+        # All agents should set busy flag for proper load balancing
+        self._busy.set()
+        logger.info(f"Incoming: {env}")
+        
+        # Increment process count
+        env.process_count += 1
 
-        if env.kind in ("task", "result"):
-            # Check safety limits before processing
-            safety_error = check_safety_limits(env)
-            if safety_error:
-                logger.warning(f"[{self.role}:{self.agent_id}] Safety limit violated: {safety_error}")
-                await self.log_envelope(env, "safety_violation", safety_error)
-                error_env = create_safety_error(env, safety_error, self.role, self.agent_id)
-                
-                # Set target_role and target_agent_id to None to drop the envelope
-                error_env.target_role = None
-                error_env.target_agent_id = None
-                
-                # Send error back to result_list if specified, otherwise drop
-                if error_env.result_list:
-                    logger.info(f"[{self.role}:{self.agent_id}] Sending safety error to result_list: {error_env.result_list}")
-                    # Set target_list so _send() routes it correctly
-                    error_env.target_list = error_env.result_list
-                    await self._send(error_env)
-                else:
-                    logger.info(f"[{self.role}:{self.agent_id}] Dropping envelope due to safety violation (no result_list)")
-                    await self.log_envelope(env, "dropped", "safety violation, no result_list")
-                return
-            
-            # All agents should set busy flag for proper load balancing
-            self._busy.set()
-            logger.info(f"Incoming: {env}")
-            
-            # Increment process count
-            env.process_count += 1
+        trace_item = {}
+        process_start_time = time.time()
+        trace_item['start_ts'] = process_start_time
+        trace_item['role'] = self.role
+        trace_item['agent_id'] = self.agent_id
 
-            trace_item = {}
-            process_start_time = time.time()
-            trace_item['start_ts'] = process_start_time
-            trace_item['role'] = self.role
-            trace_item['agent_id'] = self.agent_id
+        #By default envelope after process() will be sent back to sender
+        #More complex agent implementation can override this behavior
+        env.target_role = env.sender_role
+        env.target_agent_id = None
+        env.target_list = None
 
-            #By default envelope after process() will be sent back to sender
-            #More complex agent implementation can override this behavior
-            env.target_role = env.sender_role
-            env.target_agent_id = None
-            env.target_list = None
+        try:
+            timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
+            logger.info(f"Timeout: {timeout}")
+            await self.log_envelope(env, "processing_start", f"timeout={timeout}s")
+            await self._publish_status("process")
+            env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
+            logger.info(f"After process: {env2}")
+            if env2 is not None:
+                env = env2
 
+            exception = None
+            await self.log_envelope(env, "processing_complete", f"success")
+        except asyncio.TimeoutError:
+            exception = f"Task exceeded safety timeout: {self.task_timeout_sec}"
+            logger.error(exception)
+            await self.log_envelope(env, "processing_error", f"timeout after {self.task_timeout_sec}s")
+        except Exception as e:
+            logger.error(f"[BaseAgent] Exception in process: {e}")
+            exception = repr(e)
+            await self.log_envelope(env, "processing_error", f"exception: {exception}")
+            
+        trace_item['end_ts'] = time.time()
+        trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
+        
+        # Update total processing time
+        env.total_processing_time += trace_item['duration']
+        
+        if exception:
+            trace_item['exception'] = exception
+        
+        env.trace.append(trace_item)
+        
+        # Report envelope completion metrics to StatsAgent
+        await self._report_envelope_completion(env, trace_item['duration'])
+        
+        logger.info(f"Outgoing: {env}")
+        
+        # Log before sending
+        await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
 
-            try:
-                timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
-                logger.info(f"Timeout: {timeout}")
-                await self.log_envelope(env, "processing_start", f"timeout={timeout}s")
-                await self._publish_status("process")
-                env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
-                logger.info(f"After process: {env2}")
-                if env2 is not None:
-                    env = env2
+        await self._send(env)
 
-                exception = None
-                await self.log_envelope(env, "processing_complete", f"success")
-            except asyncio.TimeoutError:
-                exception = f"Task exceeded safety timeout: {self.task_timeout_sec}"
-                logger.error(exception)
-                await self.log_envelope(env, "processing_error", f"timeout after {self.task_timeout_sec}s")
-            except Exception as e:
-                logger.error(f"[BaseAgent] Exception in process: {e}")
-                exception = repr(e)
-                await self.log_envelope(env, "processing_error", f"exception: {exception}")
-                
-            trace_item['end_ts'] = time.time()
-            trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
-            
-            # Update total processing time
-            env.total_processing_time += trace_item['duration']
-            
-            if exception:
-                trace_item['exception'] = exception
-            
-            env.trace.append(trace_item)
-            
-            # Report envelope completion metrics to StatsAgent
-            await self._report_envelope_completion(env, trace_item['duration'])
-            
-            logger.info(f"Outgoing: {env}")
-            
-            # Log before sending
-            await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
-
-            await self._send(env)
-
-            await self._publish_status("idle")
-            self._busy.clear()
+        await self._publish_status("idle")
+        self._busy.clear()
     
     async def _report_envelope_completion(self, env: Envelope, step_duration: float) -> None:
         """Report comprehensive envelope completion metrics to StatsAgent via broadcast."""
@@ -1349,7 +1341,6 @@ class BaseAgent:
         """Publish lifecycle/status to role 'stat' broadcast channel."""
         payload = {
             "type": event,            # For StatsAgent compatibility
-            "kind": "status",
             "event": event,           # init | heartbeat | process | idle | reload | exit
             "status": event,          # For StatsAgent compatibility
             "role": self.role,
@@ -2276,7 +2267,6 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
         target_list=None,
         sender_role="ext",
         sender_agent_id="proc_req",
-        kind="task",
         payload=payload,
         update_ts=current_time,
         result_list=result_list,

@@ -36,7 +36,7 @@ class ManagerAgent(BaseAgent):
         Returns modified envelope with updated routing information.
         """
         stage = env.payload.get("stage", "start")
-        logger.info(f"[ManagerAgent] Processing {env.kind} at stage '{stage}' for {env.message_id}")
+        logger.info(f"[ManagerAgent] Processing at stage '{stage}' for {env.message_id}")
         
         # Get conversation memory
         memory = await self.get_memory(env.conversation_id)
@@ -45,7 +45,7 @@ class ManagerAgent(BaseAgent):
         action = env.payload.get("action")
         
         # Custom logging: Log pipeline decision making
-        await self.log(env.conversation_id, f"Pipeline decision: stage='{stage}' kind='{env.kind}' action='{action}'")
+        await self.log(env.conversation_id, f"Pipeline decision: stage='{stage}' action='{action}'")
         
         if action == "clear_history":
             # Clear message history only, keep other memory intact
@@ -53,7 +53,6 @@ class ManagerAgent(BaseAgent):
             logger.info(f"[ManagerAgent] Cleared message history for conversation {env.conversation_id}")
             
             env.payload["result"] = "Message history cleared successfully"
-            env.kind = "result"
             if env.result_list:
                 env.target_list = env.result_list
                 env.target_role = None
@@ -66,7 +65,6 @@ class ManagerAgent(BaseAgent):
             logger.info(f"[ManagerAgent] Cleared ALL data for conversation {env.conversation_id}")
             
             env.payload["result"] = "All conversation data cleared successfully"
-            env.kind = "result"
             if env.result_list:
                 env.target_list = env.result_list
                 env.target_role = None
@@ -89,7 +87,6 @@ class ManagerAgent(BaseAgent):
             logger.info(f"[ManagerAgent] Retrieved stats for conversation {env.conversation_id}: {stats}")
             
             env.payload["stats"] = stats
-            env.kind = "result"
             if env.result_list:
                 env.target_list = env.result_list
                 env.target_role = None
@@ -97,7 +94,7 @@ class ManagerAgent(BaseAgent):
             return env
 
         
-        if env.kind == "task" and stage == "start":
+        if stage == "start":
            
             # Regular message processing
             # Save user message to conversation history
@@ -124,23 +121,12 @@ class ManagerAgent(BaseAgent):
             await self.log(env.conversation_id, f"Memory updated: msg_count={user_prefs['message_count']} lang={user_prefs.get('language')} style={user_prefs.get('response_style')}")
             await self.log(env.conversation_id, f"Routing decision: start->detectlanguage (text_length={len(user_text)} chars)")
             
-            env.target_role = "detectlanguage"
-            env.payload["stage"] = "detect_language"
+            env.target_role = "lang"
+            env.payload["stage"] = "lang"
             logger.info(f"[ManagerAgent] Sending task to detectlanguage")
             return env
         
-        if env.kind == "result" and stage == "upper":
-            # Custom logging: Log intermediate processing result
-            processed_text = env.payload.get("text", "")
-            await self.log(env.conversation_id, f"Routing decision: upper->reverse (processed_length={len(processed_text)} chars)")
-            
-            env.kind = "task"
-            env.target_role = "reverse"
-            env.payload["stage"] = "reverse"
-            logger.info(f"[ManagerAgent] Sending task to reverse")
-            return env
-        
-        if env.kind == "result" and stage == "detect_language":
+        if stage == "lang":
             # Save assistant response to conversation history
             env.payload['text'] = f"Detected language: {env.payload.get("language", "en")}"
             await memory.add_message("assistant", env.payload['text'], {"message_id": env.message_id})
@@ -173,98 +159,11 @@ class ManagerAgent(BaseAgent):
         logger.error(f"[ManagerAgent] Unknown stage '{stage}' for {env}")
         env.payload.setdefault("errors", []).append({
             "code": "manager.stage",
-            "message": f"Unknown stage '{stage}' for kind '{env.kind}'",
+            "message": f"Unknown stage '{stage}'",
         })
         return env
 
-class UppercaseAgent(BaseAgent):
-    """Example worker: converts payload['text'] to uppercase and returns 'result'.
-    
-    Enhanced with memory usage to track processing statistics.
-    Demonstrates basic text transformation agent pattern.
-    Changes envelope kind from 'task' to 'result' after processing.
-    """
-    
-    async def process(self, env: Envelope) -> Envelope:
-        """Convert text to uppercase.
-        
-        Enhanced with memory usage to track processing statistics per conversation.
-        Transforms payload['text'] to uppercase and marks envelope as 'result'.
-        """
-        logger.info(f"[UppercaseAgent] Processing {env.kind} message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
-        
-        # Get conversation memory
-        memory = await self.get_memory(env.conversation_id)
-        
-        # Track processing statistics
-        stats = await memory.get("uppercase_stats", {
-            "processed_count": 0,
-            "total_chars": 0,
-            "last_processed": None
-        })
-        
-        text = env.payload.get("text", "")
-        processed_text = text.upper()
-        
-        # Custom logging: Log text analysis before processing
-        word_count = len(text.split())
-        has_special_chars = any(not c.isalnum() and not c.isspace() for c in text)
-        await self.log(env.conversation_id, f"Text analysis: chars={len(text)} words={word_count} special_chars={has_special_chars}")
-        
-        # Update statistics
-        stats["processed_count"] += 1
-        stats["total_chars"] += len(text)
-        stats["last_processed"] = time.time()
-        await memory.set("uppercase_stats", stats)
-        
-        # Custom logging: Log processing stats and transformation
-        await self.log(env.conversation_id, f"Processing stats: session_count={stats['processed_count']} session_chars={stats['total_chars']}")
-        await self.log(env.conversation_id, f"Transformation: '{text[:30]}{'...' if len(text) > 30 else ''}' -> '{processed_text[:30]}{'...' if len(processed_text) > 30 else ''}'")
-        
-        env.payload["text"] = processed_text
-        env.kind = "result"
-        
-        logger.info(f"[UppercaseAgent] Processed: '{text}' -> '{processed_text}' for {env.message_id}")
-        logger.info(f"[UppercaseAgent] Stats: {stats['processed_count']} messages, {stats['total_chars']} total chars")
-        
-        return env
-
-class ReverseAgent(BaseAgent):
-    """Example worker: reverses payload['text'] and returns 'result'.
-    
-    Demonstrates basic text transformation agent pattern.
-    Changes envelope kind from 'task' to 'result' after processing.
-    """
-
-    async def process(self, env: Envelope) -> Envelope:
-        """Reverse the text.
-        
-        Transforms payload['text'] by reversing character order and marks envelope as 'result'.
-        Logs processing details for debugging.
-        """
-        text = env.payload.get("text", "")
-        
-        # Custom logging: Log text characteristics and reversal analysis
-        is_palindrome = text.lower().replace(" ", "") == text.lower().replace(" ", "")[::-1]
-        vowel_count = sum(1 for c in text.lower() if c in 'aeiou')
-        consonant_count = sum(1 for c in text.lower() if c.isalpha() and c not in 'aeiou')
-        await self.log(env.conversation_id, f"Text characteristics: palindrome={is_palindrome} vowels={vowel_count} consonants={consonant_count}")
-        
-        reversed_text = text[::-1]
-        env.payload["text"] = reversed_text
-        env.kind = "result"
-        
-        # Custom logging: Log reversal result with pattern analysis
-        starts_with_space = reversed_text.startswith(' ')
-        ends_with_space = reversed_text.endswith(' ')
-        await self.log(env.conversation_id, f"Reversal complete: starts_space={starts_with_space} ends_space={ends_with_space}")
-        await self.log(env.conversation_id, f"Final result: '{text[:20]}{'...' if len(text) > 20 else ''}' -> '{reversed_text[:20]}{'...' if len(reversed_text) > 20 else ''}'")
-        
-        logger.info(f"[ReverseAgent] Processed: '{text}' -> '{env.payload['text']}' for {env.message_id}")
-        logger.info(f"[ReverseAgent] Outgoing: {env}")
-        return env
-
-class DetectLanguageAgent(BaseAgent):
+class LangAgent(BaseAgent):
     async def process(self, env: Envelope) -> Envelope:
         text = env.payload.get("text", "")
         await self.log(env.conversation_id, f"Processing text: {text}")
@@ -286,7 +185,6 @@ class DetectLanguageAgent(BaseAgent):
         await memory.set("language", lang)
         env.payload["language"] = lang
         await self.log(env.conversation_id, f"Detected language: {lang}")
-        env.kind = "result"
  
         return env
 
@@ -298,110 +196,118 @@ class TranslationAgent(BaseAgent):
 
 # Create default agent instances - they will auto-register via BaseAgent.__init__
 _manager = ManagerAgent()
-_detect_language = DetectLanguageAgent()
+_lang = LangAgent()
 _translate = TranslationAgent()
-_upper = UppercaseAgent()
-_reverse = ReverseAgent()
 
-class AlarisAssistant:
-    def __init__(self):
-        pass
-        
-    async def process_message(self, user_id: str, message: str) -> Dict[str, Any]:
-        logger.info(f"Processing message from user {user_id}: {message}")
-        response = dict()
-        payload = {"text": message, "stage": "start"}
-        response["message"] = await process_request('manager', user_id, payload)
-        return response
-   
-    async def clear_conversation_history(self, user_id: str) -> bool:
-        """Clear conversation history for a user while keeping other memory intact."""
-        try:
-            # Use the distributed memory system to clear message history
-            result = await process_request("manager", user_id, {
-                "action": "clear_history",
-                "user_id": user_id
-            })
-            
-            if "error" not in result:
-                logger.info(f"Cleared conversation history for user {user_id}")
-                return True
-            else:
-                logger.error(f"Failed to clear history for user {user_id}: {result}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error clearing conversation history for user {user_id}: {e}")
-            return False
-    
-    async def clear_all_conversation_data(self, user_id: str) -> bool:
-        """Clear ALL conversation data for a user (complete cleanup)."""
-        try:
-            # Use the distributed memory system to clear all conversation data
-            result = await process_request("manager", user_id, {
-                "action": "clear_all",
-                "user_id": user_id
-            })
-            
-            if "error" not in result:
-                logger.info(f"Cleared all conversation data for user {user_id}")
-                return True
-            else:
-                logger.error(f"Failed to clear all data for user {user_id}: {result}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error clearing all conversation data for user {user_id}: {e}")
-            return False
-    
-    async def get_conversation_stats(self, user_id: str) -> Dict[str, Any]:
-        """Get conversation statistics including message count and memory usage."""
-        try:
-            # process_request returns a string, but we need to parse the envelope payload
-            result = await process_request("manager", user_id, {
-                "action": "get_stats",
-                "user_id": user_id
-            })
-            
-            # The result is a string, but we need to get the stats from the envelope
-            # For now, let's use the direct memory access approach
-            from agent import get_memory_manager
-            
-            manager = await get_memory_manager()
-            memory = manager.get_memory(user_id)
-            
-            message_count = await memory.get_message_count()
-            user_prefs = await memory.get("user_preferences", {})
-            memory_size = await memory.get_memory_size()
-            
-            return {
-                "message_count": message_count,
-                "user_preferences": user_prefs,
-                "memory_usage": memory_size,
-                "conversation_id": user_id
-            }
-                
-        except Exception as e:
-            logger.error(f"Error getting conversation stats for user {user_id}: {e}")
-            return {}
-
-assistant = AlarisAssistant()
-
-async def clear_conversation_history(user_id: str) -> bool:
-    global assistant
-    return await assistant.clear_conversation_history(user_id)
-
-async def clear_all_conversation_data(user_id: str) -> bool:
-    global assistant
-    return await assistant.clear_all_conversation_data(user_id)
-
-async def get_conversation_stats(user_id: str) -> Dict[str, Any]:
-    global assistant
-    return await assistant.get_conversation_stats(user_id)
+# Direct function implementations (no proxy class needed)
 
 async def process_user_message(user_id: str, message: str) -> Dict[str, Any]:
-    global assistant
-    return await assistant.process_message(user_id, message)
+    """Process a user message through the agent pipeline.
+    
+    Args:
+        user_id: User identifier (used as conversation_id)
+        message: User message text to process
+        
+    Returns:
+        Dict containing the processed message response
+    """
+    logger.info(f"Processing message from user {user_id}: {message}")
+    response = dict()
+    payload = {"text": message, "stage": "start"}
+    response["message"] = await process_request('manager', user_id, payload)
+    return response
+
+async def clear_conversation_history(user_id: str) -> bool:
+    """Clear conversation history for a user while keeping other memory intact.
+    
+    Args:
+        user_id: User identifier
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Use the distributed memory system to clear message history
+        result = await process_request("manager", user_id, {
+            "action": "clear_history",
+            "user_id": user_id
+        })
+        
+        if "error" not in result:
+            logger.info(f"Cleared conversation history for user {user_id}")
+            return True
+        else:
+            logger.error(f"Failed to clear history for user {user_id}: {result}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error clearing conversation history for user {user_id}: {e}")
+        return False
+
+async def clear_all_conversation_data(user_id: str) -> bool:
+    """Clear ALL conversation data for a user (complete cleanup).
+    
+    Args:
+        user_id: User identifier
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Use the distributed memory system to clear all conversation data
+        result = await process_request("manager", user_id, {
+            "action": "clear_all",
+            "user_id": user_id
+        })
+        
+        if "error" not in result:
+            logger.info(f"Cleared all conversation data for user {user_id}")
+            return True
+        else:
+            logger.error(f"Failed to clear all data for user {user_id}: {result}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error clearing all conversation data for user {user_id}: {e}")
+        return False
+
+async def get_conversation_stats(user_id: str) -> Dict[str, Any]:
+    """Get conversation statistics including message count and memory usage.
+    
+    Args:
+        user_id: User identifier
+        
+    Returns:
+        Dict containing conversation statistics
+    """
+    try:
+        # process_request returns a string, but we need to parse the envelope payload
+        result = await process_request("manager", user_id, {
+            "action": "get_stats",
+            "user_id": user_id
+        })
+        
+        # The result is a string, but we need to get the stats from the envelope
+        # For now, let's use the direct memory access approach
+        from agent import get_memory_manager
+        
+        manager = await get_memory_manager()
+        memory = manager.get_memory(user_id)
+        
+        message_count = await memory.get_message_count()
+        user_prefs = await memory.get("user_preferences", {})
+        memory_size = await memory.get_memory_size()
+        
+        return {
+            "message_count": message_count,
+            "user_preferences": user_prefs,
+            "memory_usage": memory_size,
+            "conversation_id": user_id
+        }
+            
+    except Exception as e:
+        logger.error(f"Error getting conversation stats for user {user_id}: {e}")
+        return {}
 
 if __name__ == "__main__":
     async def _demo():
