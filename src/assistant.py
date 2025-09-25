@@ -12,45 +12,14 @@ import util
 
 logger = logging.getLogger(__name__)
 
-class ManagerAgent(BaseAgent):
-    """Pipeline orchestrator that routes messages through processing stages.
-    
-    Enhanced with distributed memory for conversation history and user preferences.
-    
-    Implements a simple state machine:
-    - start -> uppercase -> reverse -> final result
-    
-    Demonstrates memory usage for conversation tracking.
-    """
-    
+class CommandAgent(BaseAgent):
     async def process(self, env: Envelope) -> Envelope:
-        """Route messages through the pipeline stages.
-        
-        Enhanced with memory usage for conversation tracking and user preferences.
-        
-        State machine logic:
-        1. task + start -> route to uppercase (save user message to memory)
-        2. result + upper -> route to reverse  
-        3. result + reverse -> send to result_list (save assistant response to memory)
-        
-        Returns modified envelope with updated routing information.
-        """
-        stage = env.payload.get("stage", "start")
-        logger.info(f"[ManagerAgent] Processing at stage '{stage}' for {env.message_id}")
-        
-        # Get conversation memory
-        memory = await self.get_memory(env.conversation_id)
-
-        # Check if this is a special action
+        """Process command envelope."""
         action = env.payload.get("action")
-        
-        # Custom logging: Log pipeline decision making
-        await self.log(env.conversation_id, f"Pipeline decision: stage='{stage}' action='{action}'")
-        
         if action == "clear_history":
             # Clear message history only, keep other memory intact
             await self.cleanup_message_history(env.conversation_id)
-            logger.info(f"[ManagerAgent] Cleared message history for conversation {env.conversation_id}")
+            logger.info(f"[CommandAgent] Cleared message history for conversation {env.conversation_id}")
             
             env.payload["result"] = "Message history cleared successfully"
             if env.result_list:
@@ -62,7 +31,7 @@ class ManagerAgent(BaseAgent):
         elif action == "clear_all":
             # Clear ALL conversation data (complete cleanup)
             await self.cleanup_memory(env.conversation_id)
-            logger.info(f"[ManagerAgent] Cleared ALL data for conversation {env.conversation_id}")
+            logger.info(f"[CommandAgent] Cleared ALL data for conversation {env.conversation_id}")
             
             env.payload["result"] = "All conversation data cleared successfully"
             if env.result_list:
@@ -73,6 +42,7 @@ class ManagerAgent(BaseAgent):
         
         elif action == "get_stats":
             # Get conversation statistics
+            memory = await self.get_memory(env.conversation_id)
             message_count = await memory.get_message_count()
             user_prefs = await memory.get("user_preferences", {})
             memory_size = await memory.get_memory_size()
@@ -84,7 +54,7 @@ class ManagerAgent(BaseAgent):
                 "conversation_id": env.conversation_id
             }
             
-            logger.info(f"[ManagerAgent] Retrieved stats for conversation {env.conversation_id}: {stats}")
+            logger.info(f"[CommandAgent] Retrieved stats for conversation {env.conversation_id}: {stats}")
             
             env.payload["stats"] = stats
             if env.result_list:
@@ -92,8 +62,38 @@ class ManagerAgent(BaseAgent):
                 env.target_role = None
                 env.target_agent_id = None
             return env
-
         
+        # Unknown action - return error
+        logger.error(f"[CommandAgent] Unknown action '{action}' for {env}")
+        env.payload.setdefault("errors", []).append({
+            "code": "command.action",
+            "message": f"Unknown action '{action}'",
+        })
+        return env
+
+class ManagerAgent(BaseAgent):
+    """Pipeline orchestrator that routes messages through processing stages.
+    
+    Enhanced with distributed memory for conversation history and user preferences.
+    
+    """
+    
+    async def process(self, env: Envelope) -> Envelope:
+        """Route messages through the pipeline stages.
+        
+        Enhanced with memory usage for conversation tracking and user preferences.
+        
+        Returns modified envelope with updated routing information.
+        """
+        stage = env.payload.get("stage", "start")
+        logger.info(f"[ManagerAgent] Processing at stage '{stage}' for {env.message_id}")
+        
+        # Get conversation memory
+        memory = await self.get_memory(env.conversation_id)
+
+        # Custom logging: Log pipeline decision making
+        await self.log(env.conversation_id, f"Pipeline decision: stage='{stage}'")
+            
         if stage == "start":
            
             # Regular message processing
@@ -196,6 +196,7 @@ class TranslationAgent(BaseAgent):
 
 # Create default agent instances - they will auto-register via BaseAgent.__init__
 _manager = ManagerAgent()
+_command = CommandAgent()
 _lang = LangAgent()
 _translate = TranslationAgent()
 
@@ -228,7 +229,7 @@ async def clear_conversation_history(user_id: str) -> bool:
     """
     try:
         # Use the distributed memory system to clear message history
-        result = await process_request("manager", user_id, {
+        result = await process_request("command", user_id, {
             "action": "clear_history",
             "user_id": user_id
         })
@@ -255,7 +256,7 @@ async def clear_all_conversation_data(user_id: str) -> bool:
     """
     try:
         # Use the distributed memory system to clear all conversation data
-        result = await process_request("manager", user_id, {
+        result = await process_request("command", user_id, {
             "action": "clear_all",
             "user_id": user_id
         })
@@ -282,7 +283,7 @@ async def get_conversation_stats(user_id: str) -> Dict[str, Any]:
     """
     try:
         # process_request returns a string, but we need to parse the envelope payload
-        result = await process_request("manager", user_id, {
+        result = await process_request("command", user_id, {
             "action": "get_stats",
             "user_id": user_id
         })

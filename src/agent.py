@@ -1029,18 +1029,28 @@ class BaseAgent:
             details: Optional additional details
         """
         # Create message from envelope attributes
-        message_parts = [
-            f"{action.upper()}: message {env.message_id}",
-            f"stage={env.payload.get('stage', 'N/A')}",
-            f"target_role={env.target_role}",
-            f"process_count={env.process_count}",
-            f"total_time={env.total_processing_time:.3f}s"
-        ]
+        message_parts = []
+        message_parts.append(f"{action.upper():<10}")
+        message_parts.append(f"stage={env.payload.get('stage', 'N/A'):<10}")
+        to_list = []
+        if env.target_agent_id is not None:
+            to_list.append(env.target_agent_id)
+        if env.target_role is not None:
+            to_list.append(env.target_role)
+        if env.target_list is not None:
+            to_list.append(env.target_list)
+        if len(to_list) > 0:
+            message_parts.append(f"to:{', '.join(to_list):<10}")
+        else:
+            message_parts.append("to: N/A")
+
+        message_parts.append(f"process_count={env.process_count:<10}")
+        message_parts.append(f"total_time={env.total_processing_time:0.3f}s")
         
         if details:
             message_parts.append(details)
             
-        message = " | ".join(message_parts)
+        message = " ".join(message_parts)
         
         # Use unified log method for consistent formatting
         await self.log(env.conversation_id, message)
@@ -1240,7 +1250,7 @@ class BaseAgent:
         try:
             timeout = float(env.payload.get("__agent_timeout_sec", self.task_timeout_sec))
             logger.info(f"Timeout: {timeout}")
-            await self.log_envelope(env, "processing_start", f"timeout={timeout}s")
+            await self.log_envelope(env, "start", f"timeout={timeout}s")
             await self._publish_status("process")
             env2 = await asyncio.wait_for(self.process(env), timeout=timeout)
             logger.info(f"After process: {env2}")
@@ -1248,15 +1258,15 @@ class BaseAgent:
                 env = env2
 
             exception = None
-            await self.log_envelope(env, "processing_complete", f"success")
+            await self.log_envelope(env, "complete", f"success")
         except asyncio.TimeoutError:
             exception = f"Task exceeded safety timeout: {self.task_timeout_sec}"
             logger.error(exception)
-            await self.log_envelope(env, "processing_error", f"timeout after {self.task_timeout_sec}s")
+            await self.log_envelope(env, "error", f"timeout after {self.task_timeout_sec}s")
         except Exception as e:
             logger.error(f"[BaseAgent] Exception in process: {e}")
             exception = repr(e)
-            await self.log_envelope(env, "processing_error", f"exception: {exception}")
+            await self.log_envelope(env, "error", f"exception: {exception}")
             
         trace_item['end_ts'] = time.time()
         trace_item['duration'] = trace_item['end_ts'] - trace_item['start_ts']
@@ -1299,7 +1309,7 @@ class BaseAgent:
             return
         
         # Log before sending
-        await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
+        #await self.log_envelope(env, "sending", f"to target_role={env.target_role} target_agent_id={env.target_agent_id} target_list={env.target_list}")
 
         await self._send(env)
 
@@ -2303,9 +2313,8 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
     
     logger.info(f"[process_request] Starting request {message_id}")
     
-    # Send initial task to manager
     redis = await get_redis()
-    await xadd(redis, role_stream_key("manager"), env.to_stream_fields())
+    await xadd(redis, role_stream_key(role), env.to_stream_fields())
     logger.info(f"[process_request] Sent initial task to manager stream for {message_id}")
     
     # Wait for final result with shutdown awareness
