@@ -378,6 +378,23 @@ class Envelope:
     
     def __str__(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
+    
+    def final(self) -> "Envelope":
+        """Configure envelope for final result delivery.
+        
+        Sets up the envelope to be sent to the result_list (external caller)
+        by clearing agent routing and setting target_list to result_list.
+        
+        This is a convenience method to eliminate boilerplate in agent classes.
+        
+        Returns:
+            Self (for method chaining)
+        """
+        if self.result_list:
+            self.target_list = self.result_list
+            self.target_role = None
+            self.target_agent_id = None
+        return self
 
 # -------------------------- Distributed Memory Subsystem --------------------------
 

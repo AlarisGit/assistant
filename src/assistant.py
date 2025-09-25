@@ -22,11 +22,7 @@ class CommandAgent(BaseAgent):
             logger.info(f"[CommandAgent] Cleared message history for conversation {env.conversation_id}")
             
             env.payload["result"] = "Message history cleared successfully"
-            if env.result_list:
-                env.target_list = env.result_list
-                env.target_role = None
-                env.target_agent_id = None
-            return env
+            return env.final()
         
         elif action == "clear_all":
             # Clear ALL conversation data (complete cleanup)
@@ -34,11 +30,7 @@ class CommandAgent(BaseAgent):
             logger.info(f"[CommandAgent] Cleared ALL data for conversation {env.conversation_id}")
             
             env.payload["result"] = "All conversation data cleared successfully"
-            if env.result_list:
-                env.target_list = env.result_list
-                env.target_role = None
-                env.target_agent_id = None
-            return env
+            return env.final()
         
         elif action == "get_stats":
             # Get conversation statistics
@@ -57,11 +49,7 @@ class CommandAgent(BaseAgent):
             logger.info(f"[CommandAgent] Retrieved stats for conversation {env.conversation_id}: {stats}")
             
             env.payload["stats"] = stats
-            if env.result_list:
-                env.target_list = env.result_list
-                env.target_role = None
-                env.target_agent_id = None
-            return env
+            return env.final()
         
         # Unknown action - return error
         logger.error(f"[CommandAgent] Unknown action '{action}' for {env}")
@@ -149,11 +137,7 @@ class ManagerAgent(BaseAgent):
             await self.log(env.conversation_id, f"Conversation stats: {json.dumps(env.payload['conversation_stats'], ensure_ascii=False)}")
             
             logger.info(f"[ManagerAgent] Final result ready: {env}")
-            if env.result_list:
-                env.target_list = env.result_list
-                env.target_role = None
-                env.target_agent_id = None
-            return env
+            return env.final()
         
         # Unknown stage
         logger.error(f"[ManagerAgent] Unknown stage '{stage}' for {env}")
