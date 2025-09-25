@@ -1,3 +1,43 @@
+"""
+================================================================================
+Assistant Application Layer - Agent Implementations
+================================================================================
+
+This module contains the application-level agent implementations that define
+the business logic for the conversational AI assistant. It demonstrates the
+separation of concerns between system infrastructure (agent.py) and application
+logic (assistant.py).
+
+Agent Architecture:
+- CommandAgent: Handles action-based commands (clear_history, clear_all, get_stats)
+- ManagerAgent: Orchestrates FSM-based message pipeline (start -> lang -> final)
+- LangAgent: Detects language from conversation history
+- TranslationAgent: Placeholder for future translation functionality
+
+Key Features:
+- Clean separation between command handling and FSM orchestration
+- Distributed conversation memory with automatic cleanup
+- Custom logging for agent-specific insights
+- Simplified envelope handling with env.final() method
+- Zero-parameter constructors with automatic registration
+
+External API:
+- process_user_message(): Main entry point for user messages
+- clear_conversation_history(): Clear message history only
+- clear_all_conversation_data(): Complete conversation cleanup
+- get_conversation_stats(): Retrieve conversation statistics
+
+Usage:
+    # Process user message through pipeline
+    result = await process_user_message("user123", "Hello world")
+    
+    # Clear conversation history
+    success = await clear_conversation_history("user123")
+    
+    # Get conversation statistics
+    stats = await get_conversation_stats("user123")
+"""
+
 import logging
 from typing import Dict, Any
 import asyncio
@@ -13,8 +53,28 @@ import util
 logger = logging.getLogger(__name__)
 
 class CommandAgent(BaseAgent):
+    """Handles action-based command requests.
+    
+    This agent processes administrative commands that don't require FSM routing:
+    - clear_history: Clear conversation message history only
+    - clear_all: Complete conversation data cleanup
+    - get_stats: Retrieve conversation statistics and memory usage
+    
+    The agent automatically routes final results back to the external caller
+    using the env.final() convenience method.
+    
+    Role: "command" (auto-derived from class name)
+    """
+    
     async def process(self, env: Envelope) -> Envelope:
-        """Process command envelope."""
+        """Process action-based command envelope.
+        
+        Args:
+            env: Envelope containing action in payload
+            
+        Returns:
+            Envelope with result or error, configured for final delivery
+        """
         action = env.payload.get("action")
         if action == "clear_history":
             # Clear message history only, keep other memory intact
@@ -60,10 +120,22 @@ class CommandAgent(BaseAgent):
         return env
 
 class ManagerAgent(BaseAgent):
-    """Pipeline orchestrator that routes messages through processing stages.
+    """FSM-based pipeline orchestrator for message processing.
     
-    Enhanced with distributed memory for conversation history and user preferences.
+    This agent implements a finite state machine that routes messages through
+    different processing stages:
     
+    State Machine:
+    1. start -> lang: Route user message to language detection
+    2. lang -> final: Process detected language and return result
+    
+    Features:
+    - Distributed conversation memory for history and preferences
+    - Automatic message counting and user preference tracking
+    - Custom logging for pipeline decision making and statistics
+    - Integration with memory cleanup and statistics reporting
+    
+    Role: "manager" (auto-derived from class name)
     """
     
     async def process(self, env: Envelope) -> Envelope:
@@ -148,6 +220,21 @@ class ManagerAgent(BaseAgent):
         return env
 
 class LangAgent(BaseAgent):
+    """Language detection agent using conversation history.
+    
+    Analyzes recent conversation messages to detect the primary language
+    being used by the user. Supports Cyrillic (Russian) and Chinese detection
+    with English as the default fallback.
+    
+    Detection Logic:
+    - Examines up to 6 recent user messages
+    - Checks for Cyrillic characters (Russian)
+    - Checks for Chinese characters
+    - Defaults to English if no specific patterns found
+    
+    Role: "lang" (auto-derived from class name)
+    """
+    
     async def process(self, env: Envelope) -> Envelope:
         text = env.payload.get("text", "")
         await self.log(env.conversation_id, f"Processing text: {text}")
@@ -173,7 +260,21 @@ class LangAgent(BaseAgent):
         return env
 
 class TranslationAgent(BaseAgent):
+    """Translation agent placeholder for future functionality.
+    
+    This agent is currently a placeholder that can be extended to provide
+    translation services between different languages detected by LangAgent.
+    
+    Future capabilities:
+    - Text translation between supported languages
+    - Integration with translation APIs (Google Translate, etc.)
+    - Conversation context-aware translation
+    
+    Role: "translation" (auto-derived from class name)
+    """
+    
     async def process(self, env: Envelope) -> Envelope:
+        """Placeholder implementation - returns envelope unchanged."""
         return env
     
 

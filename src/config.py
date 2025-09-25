@@ -21,6 +21,9 @@ else:
     print(f"DEBUG: Warning: .env file not found at {dotenv_path}. Using system environment variables or defaults.", file=sys.stderr)
     sys.exit(1)
 
+# --- Version ---
+VERSION = os.getenv("VERSION", "2.1.0")
+
 # --- Logging ---
 LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
@@ -147,8 +150,6 @@ TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
 ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 60))
-
-VERSION = os.getenv("VERSION", "1.0.1")
 
 logger.info("Configuration loaded.")
 

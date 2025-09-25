@@ -1,85 +1,112 @@
 """
 ================================================================================
 Unified async agent architecture on Redis (Streams + Pub/Sub).
-All participants (client, manager, workers, stats) inherit from BaseAgent and
-differ only by their 'role' and overridden process() method.
+All participants (command, manager, workers, stats) inherit from BaseAgent and
+differ only by their automatically derived role and overridden process() method.
 
-This module is intentionally self-contained and heavily documented to minimize
-onboarding time for new contributors. Keep comments and docstrings in English.
+This module provides a production-grade agent framework with automatic registration,
+safety mechanisms, distributed memory, and comprehensive logging.
 
 --------------------------------------------------------------------------------
 TABLE OF CONTENTS
 --------------------------------------------------------------------------------
 1) High-Level Overview
-2) Terminology and Roles
-3) Message Model (Envelope)
+2) Agent Architecture & Automatic Registration
+3) Message Model (Envelope) & Safety Features
 4) Addressing & Routing
 5) Redis Keys and Consumer Groups
 6) Lifecycle, Heartbeats, and Control
 7) Concurrency & Backpressure
-8) Timeouts & Reliability (ACKs, DLQ, Idempotency)
-9) Scaling Patterns (Horizontal, Sharding, Priorities)
-10) Observability (Stats role, what to log/emit)
-11) Security Notes
+8) Safety Mechanisms (Circuit Breakers, Self-Loop Detection)
+9) Distributed Memory System
+10) Conversation-Specific Logging
+11) Observability (Stats role, what to log/emit)
 12) Usage Patterns (recipes and examples)
-13) Known Limitations
+13) Automatic Cleanup & Signal Handling
 14) Extensibility Guide
 
 --------------------------------------------------------------------------------
 1) HIGH-LEVEL OVERVIEW
 --------------------------------------------------------------------------------
-- This module implements a unified agent runtime on top of Redis 5+.
-- All components are "agents" derived from BaseAgent:
-  * Client-facing "requester" code creates an initial Envelope and pushes it into
-    a role stream (e.g., to 'manager').
-  * ManagerAgent is just another agent with role='manager'; it routes messages
-    between roles/agents according to a scenario (stages/pipeline).
-  * Worker agents perform actual tasks (LLM call, parsing, enrichment, etc.).
-  * StatsAgent listens to lifecycle/heartbeat broadcast events for monitoring.
+- This module implements a production_grade agent runtime on top of Redis 5+.
+- All components are "agents" derived from BaseAgent with automatic registration:
+  * CommandAgent handles action-based requests (clear_history, get_stats, etc.)
+  * ManagerAgent orchestrates FSM-based message routing through pipeline stages
+  * Worker agents (LangAgent, etc.) perform specialized processing tasks
+  * StatsAgent monitors system health and performance metrics
+
+- Key Features:
+  * Automatic role derivation from class names (ManagerAgent -> "manager")
+  * Zero-parameter constructors with automatic Redis connection management
+  * Built-in safety mechanisms (circuit breakers, self-loop detection)
+  * Distributed conversation memory with automatic cleanup
+  * Conversation-specific logging for isolated debugging
+  * Comprehensive error handling and graceful shutdown
 
 - Communication channels:
-  * Point-to-role messages: Redis Streams "stream:role:{role}" with a consumer
-    group "cg:role:{role}". Exactly one agent of that role processes a message.
+  * Point-to-role messages: Redis Streams "stream:role:{role}" with consumer
+    group "cg:role:{role}". Load-balanced across agents of that role.
   * Point-to-agent messages: Redis Streams "stream:agent:{agent_id}" with
-    "cg:agent:{agent_id}". Use this to address a specific agent instance.
-  * Broadcast commands: Redis Pub/Sub channels:
-      "broadcast:all" and "broadcast:role:{role}"
-    Used for system-wide or role-scoped control (shutdown/reload, etc.).
+    "cg:agent:{agent_id}". Direct agent addressing for specific instances.
+  * Result delivery: Redis Lists for synchronous result retrieval
+  * Broadcast commands: Redis Pub/Sub channels for system control
 
-- Backpressure & fairness:
-  * An agent pauses role/direct stream consumption while it is busy processing
-    a task, but continues handling broadcast commands. This ensures fair
-    distribution across same-role agents (a busy agent won't keep pulling more).
+- Safety & Reliability:
+  * Circuit breakers prevent infinite loops and resource exhaustion
+  * Self-loop detection catches immediate routing errors
+  * Automatic cleanup handles ungraceful shutdowns
+  * Envelope aging prevents stale message processing
 
 --------------------------------------------------------------------------------
-2) TERMINOLOGY AND ROLES
+2) AGENT ARCHITECTURE & AUTOMATIC REGISTRATION
 --------------------------------------------------------------------------------
-- role: a logical function an agent fulfills (e.g., "manager", "uppercase",
-  "reverse", "stat", "vectorize", "llm", etc.).
-- agent_id: a unique identifier of a concrete agent instance:
+- role: A logical function automatically derived from class name:
+  * ManagerAgent -> "manager" (FSM-based pipeline orchestration)
+  * CommandAgent -> "command" (action-based command handling)
+  * LangAgent -> "lang" (language detection)
+  * StatsAgent -> "stats" (system monitoring)
+
+- agent_id: A unique identifier of a concrete agent instance:
     "{HOSTNAME}:{PID}:{COUNTER}"
-  This enables multiple agents of the same role in a single process or across
-  multiple hosts.
+  This enables multiple agents of the same role across processes and hosts.
 
-- Predefined roles in this example:
-  * "manager": decides routing between worker roles.
-  * "uppercase": transforms text to uppercase.
-  * "reverse": reverses text.
-  * "stat": listens to lifecycle/heartbeat events over Pub/Sub.
+- Automatic Registration:
+  * Agents auto-register via BaseAgent.__init__() with zero parameters
+  * Role derived automatically from class name (removes "Agent" suffix)
+  * Redis connection managed globally via get_redis()
+  * No manual configuration required for basic agent creation
+
+- Agent Responsibilities:
+  * CommandAgent: Handles action-based requests (clear_history, clear_all, get_stats)
+  * ManagerAgent: Orchestrates FSM stages (start -> lang -> final)
+  * LangAgent: Detects language from conversation history
+  * StatsAgent: Monitors system health and performance metrics
 
 --------------------------------------------------------------------------------
-3) MESSAGE MODEL (ENVELOPE)
+3) MESSAGE MODEL (ENVELOPE) & SAFETY FEATURES
 --------------------------------------------------------------------------------
-- Envelope is the only message type in Streams; it carries:
-  * Addressing: target_role, target_agent_id
+- Envelope is the canonical message type with comprehensive safety features:
+  * Addressing: target_role, target_agent_id, target_list
   * Sender: sender_role, sender_agent_id
   * Payload: arbitrary JSON (domain data + control flags)
-  * Trace: a list of breadcrumbs for debugging
-  * Timestamps: ts (float)
+  * Trace: detailed processing breadcrumbs with timing
+  * Safety attributes: process_count, total_processing_time, create_ts
+  * Result delivery: result_list for external caller synchronization
+
+- Safety Mechanisms:
+  * Circuit breakers: MAX_PROCESS_COUNT (50), MAX_TOTAL_PROCESSING_TIME (300s)
+  * Envelope aging: MAX_ENVELOPE_AGE (600s) prevents stale message processing
+  * Self-loop detection: Immediate prevention of agent targeting itself
+  * Automatic error handling: Safety violations create error envelopes
+
+- Envelope.final() Method:
+  * Convenience method for result delivery: env.final() replaces boilerplate
+  * Automatically sets target_list=result_list and clears agent routing
+  * Encapsulates low-level routing logic in the Envelope class
 
 - Final responses for external callers:
   * The "result_list" is a per-request Redis LIST where the final Envelope is
-    pushed (LPUSH). The caller BRPOP's from it to get the result.
+    pushed (LPUSH). The caller uses BRPOP to get the synchronous result.
 
 --------------------------------------------------------------------------------
 4) ADDRESSING & ROUTING

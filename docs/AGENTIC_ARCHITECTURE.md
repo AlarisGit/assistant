@@ -2,47 +2,83 @@
 
 ## Overview
 
-This document defines the production-grade Redis Streams-based architecture for the SMS Platform Assistant, implementing a unified agent system with comprehensive reliability, monitoring, and connection management features. The system provides enterprise-level robustness while maintaining developer simplicity through automatic cleanup, connection pooling, retry logic, and comprehensive statistics reporting.
+This document defines the production-grade Redis Streams-based architecture for the Conversational AI Assistant, implementing a unified agent system with comprehensive safety mechanisms, distributed memory, and conversation-specific logging. The system provides enterprise-level robustness while maintaining ultimate developer simplicity through automatic registration, zero-parameter constructors, and intelligent error handling.
 
 ## Architecture Evolution
 
-### Version 2.0 - Production Features
-- ✅ **Redis Connection Pool**: Eliminates bottlenecks with 20-connection pool
-- ✅ **Automatic Retry Logic**: Exponential backoff for connection failures
-- ✅ **Health Monitoring**: Continuous Redis connection health checks
-- ✅ **Safety Limits**: Circuit breaker system prevents resource exhaustion
-- ✅ **File-Based Statistics**: Clean reporting without logger noise
-- ✅ **Automatic Cleanup**: Graceful shutdown on exit/signals
-- ✅ **Dynamic Agent Registry**: Runtime agent creation and management
-- ✅ **Zero-Config Agents**: Automatic role derivation from class names
+### Version 2.1 - Current Production Features
+- ✅ **Automatic Agent Registration**: Zero-parameter constructors with role auto-derivation
+- ✅ **Global Redis Management**: Centralized connection handling via get_redis()
+- ✅ **Safety Mechanisms**: Circuit breakers, self-loop detection, envelope aging
+- ✅ **Distributed Memory System**: Conversation-scoped data with automatic cleanup
+- ✅ **Conversation-Specific Logging**: Isolated debug logs per conversation
+- ✅ **Command/FSM Separation**: Clear separation between action and stage handling
+- ✅ **Envelope.final() Method**: Simplified result delivery with encapsulated routing
+- ✅ **Comprehensive Error Handling**: Graceful degradation and automatic recovery
+- ✅ **Signal-Based Cleanup**: Automatic shutdown handling for all termination scenarios
 
 ## Core Architecture Principles
 
-### 1. Unified Agent Model
-- All components inherit from `BaseAgent` with role-specific `process()` methods
-- Agents differentiated by `role` rather than class hierarchy
-- Stateless design with all conversation data in Envelope payload
-- Horizontal scaling through multiple instances per role
+### 1. Automatic Agent Registration
+- All agents inherit from `BaseAgent` with zero-parameter constructors
+- Roles automatically derived from class names (ManagerAgent -> "manager")
+- Global Redis connection management via `get_redis()` function
+- Dynamic agent registry with runtime registration and cleanup
+- No manual configuration required for basic agent creation
 
-### 2. Production-Grade Redis Management
-- **Connection Pool**: 20-connection pool with automatic scaling
-- **Retry Logic**: Exponential backoff for temporary failures
-- **Health Monitoring**: 30-second ping checks with performance tracking
-- **Graceful Recovery**: Automatic reconnection and failure detection
+### 2. Safety-First Architecture
+- **Circuit Breakers**: Process count (50), total time (300s), envelope age (600s)
+- **Self-Loop Detection**: Immediate prevention of infinite routing loops
+- **Envelope Aging**: Automatic stale message prevention
+- **Error Encapsulation**: Safety violations create structured error responses
+- **Graceful Degradation**: System continues operating despite individual failures
 
-### 3. Redis Streams Communication
-- **Point-to-Role**: `stream:role:{role}` with consumer groups for load balancing
-- **Point-to-Agent**: `stream:agent:{agent_id}` for direct routing
-- **Broadcast Control**: Pub/Sub channels for system commands
-- **Reply Lists**: Per-request Redis lists for external response delivery
+### 3. Distributed Memory System
+- **Conversation-Scoped**: Each conversation has isolated memory space
+- **Automatic Cleanup**: TTL-based expiration and manual cleanup methods
+- **Dict-Like Interface**: Seamless get/set operations for preferences and state
+- **Message History**: Structured conversation history with role-based organization
+- **Cross-Process**: Memory accessible across all agent instances and hosts
 
-### 4. Envelope-Based State Management
-- Single message type containing all conversation data
-- No separate Context object - everything in payload
-- Complete trace system for debugging and observability
-- Manager-controlled history cleanup and state management
+### 4. Conversation-Specific Logging
+- **Isolated Debug Files**: Each conversation gets its own log file
+- **Timestamped Entries**: Both absolute and relative timestamps for analysis
+- **Automatic Organization**: Logs organized by conversation_id and start timestamp
+- **Agent-Specific Insights**: Custom logging for business logic decisions
+- **Complete Traceability**: Full envelope journey from start to finish
 
-## Production System Architecture
+### 5. Simplified Envelope Handling
+- **env.final() Method**: One-line result delivery replacing 4-line boilerplate
+- **Encapsulated Routing**: Low-level routing logic moved into Envelope class
+- **Method Chaining**: Returns self for potential future chaining operations
+- **Consistent Behavior**: Same routing logic applied everywhere automatically
+
+## Current Agent Architecture
+
+### Agent Responsibilities
+
+- **CommandAgent**: Handles action-based administrative commands with safety mechanisms
+  - `clear_history`: Clear conversation message history only
+  - `clear_all`: Complete conversation data cleanup
+  - `get_stats`: Retrieve conversation statistics and memory usage
+  - Built-in circuit breaker protection and error handling
+
+- **ManagerAgent**: Orchestrates FSM-based message pipeline with safety checks
+  - `start` stage: Route user message to language detection
+  - `lang` stage: Process detected language and return result
+  - Manages conversation memory and user preferences
+  - Includes self-loop detection and circuit breaker mechanisms
+
+- **LangAgent**: Detects language from conversation history with safety limits
+  - Analyzes recent user messages for language patterns
+  - Supports Cyrillic (Russian) and Chinese detection
+  - Defaults to English for unrecognized patterns
+  - Protected by envelope aging and processing time limits
+
+- **StatsAgent**: Monitors system health and performance with circuit breakers
+  - Tracks agent lifecycle events and performance metrics
+  - Provides system-wide observability and monitoring
+  - Includes safety violation tracking and reporting
 
 ### High-Level System Overview
 
@@ -173,9 +209,11 @@ class Envelope:
     sender_role: str                  # Sender role
     sender_agent_id: str              # Sender agent ID
     
-    # Message Type and Data
-    kind: str                         # "task" | "result" | "control" | "status"
+    # Message Data and Safety Attributes
     payload: Dict[str, Any]           # All conversation data and results
+    process_count: int = 0            # Processing step counter for circuit breaker
+    total_processing_time: float = 0.0  # Cumulative processing time
+    create_ts: float = 0.0            # Envelope creation timestamp
     update_ts: float                  # Last update timestamp
     
     # Response Routing
@@ -496,7 +534,6 @@ XADD "stream:role:manager" {
         "message_id": "conv_123:1726339057.123",
         "target_role": "manager",
         "sender_role": "external",
-        "kind": "task",
         "payload": {"text": "Hello, world!", "stage": "start"},
         "result_list": "result:conv_123:1726339057.123"
     })
@@ -538,8 +575,7 @@ class TranslationAgent(BaseAgent):
             "translated_query": response.content,
             "confidence": 0.95
         }
-        env.kind = "result"
-        return env
+        return env.final()
 ```
 
 ### RAG Pipeline Integration
@@ -562,8 +598,7 @@ class SearchAgent(BaseAgent):
             "sources": [chunk["source"] for chunk in chunks],
             "relevance_scores": [chunk["score"] for chunk in chunks]
         }
-        env.kind = "result"
-        return env
+        return env.final()
 ```
 
 ### Telegram Bot Integration
@@ -651,7 +686,7 @@ env.trace.append(trace_item)
 # Errors added to payload for manager routing decisions
 env.payload.setdefault("errors", []).append({
     "code": "manager.stage",
-    "message": f"Unknown stage '{stage}' for kind '{env.kind}'"
+    "message": f"Unknown stage '{stage}'"
 })
 ```
 
@@ -687,7 +722,6 @@ env.trace.append(trace_item)
 ```python
 # StatsAgent receives all lifecycle events
 {
-    "kind": "status",
     "event": "heartbeat",  # init | heartbeat | reload | exit
     "role": self.role,
     "agent_id": self.agent_id,
@@ -747,8 +781,7 @@ class TranslationAgent(BaseAgent):  # Role automatically becomes "translation"
     async def process(self, env: Envelope) -> Envelope:
         # Business logic here
         env.payload["translation_result"] = await translate(env.payload["text"])
-        env.kind = "result"
-        return env
+        return env.final()
 
 # Agent automatically registers and starts when runtime is active
 translation_agent = TranslationAgent()  # That's it!
@@ -777,7 +810,6 @@ async def test_uppercase_agent():
         target_list=None,
         sender_role="external",
         sender_agent_id="test",
-        kind="task",
         payload={"text": "hello world", "stage": "upper"},
         ts=time.time(),
         result_list="result:test_1",
@@ -788,7 +820,7 @@ async def test_uppercase_agent():
     result = await agent.process(env)
     
     assert result.payload["text"] == "HELLO WORLD"
-    assert result.kind == "result"
+    assert result.target_list == env.result_list  # Routed for final delivery
 ```
 
 ## Future Extensions
