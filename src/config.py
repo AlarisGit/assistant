@@ -151,6 +151,13 @@ DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
 ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 60))
 
+# Stream message expiration - messages older than this are considered stale
+# Should be same as ASSISTANT_TIMEOUT since that's the max time we wait for responses
+STREAM_MESSAGE_EXPIRATION_SEC = int(os.getenv("STREAM_MESSAGE_EXPIRATION_SEC", str(ASSISTANT_TIMEOUT)))
+
+# How often to run stream cleanup (remove expired messages)
+STREAM_CLEANUP_INTERVAL_SEC = int(os.getenv("STREAM_CLEANUP_INTERVAL_SEC", "30"))
+
 logger.info("Configuration loaded.")
 
 # --- Rate limiting and metrics ---

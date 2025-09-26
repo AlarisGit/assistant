@@ -268,6 +268,7 @@ from redis.retry import Retry
 from redis.backoff import ExponentialBackoff
 
 import config
+from stream_cleanup import start_cleanup_manager, stop_cleanup_manager
 import logging
 from util import get_hostname, get_pid
 
@@ -1129,10 +1130,12 @@ class BaseAgent:
                             if env.target_role not in (None, self.role):
                                 logger.info(f"[{self.role}:{self.agent_id}] Skipping message for role {env.target_role}: {env.message_id}")
                                 await self.redis.xack(self._role_stream, self._role_group, msg_id)
+                                await self.redis.xdel(self._role_stream, msg_id)
                                 continue
                             if env.target_agent_id is not None:
                                 logger.info(f"[{self.role}:{self.agent_id}] Skipping direct message for agent {env.target_agent_id}: {env.message_id}")
                                 await self.redis.xack(self._role_stream, self._role_group, msg_id)
+                                await self.redis.xdel(self._role_stream, msg_id)
                                 continue
 
                             logger.info(f"[{self.role}:{self.agent_id}] Processing message: {env.message_id} stage: {env.payload.get('stage', 'N/A')}")
@@ -1142,7 +1145,9 @@ class BaseAgent:
 
                             await self._handle_envelope(env)
                         finally:
+                            # CRITICAL: Acknowledge AND delete message from stream
                             await self.redis.xack(self._role_stream, self._role_group, msg_id)
+                            await self.redis.xdel(self._role_stream, msg_id)
         except asyncio.CancelledError:
             pass
 
@@ -1173,6 +1178,7 @@ class BaseAgent:
                             # Accept direct messages for this specific agent only
                             if env.target_agent_id != self.agent_id:
                                 await self.redis.xack(self._agent_stream, self._agent_group, msg_id)
+                                await self.redis.xdel(self._agent_stream, msg_id)
                                 continue
 
                             # Log envelope reception
@@ -1180,7 +1186,9 @@ class BaseAgent:
 
                             await self._handle_envelope(env)
                         finally:
+                            # CRITICAL: Acknowledge AND delete message from stream
                             await self.redis.xack(self._agent_stream, self._agent_group, msg_id)
+                            await self.redis.xdel(self._agent_stream, msg_id)
         except asyncio.CancelledError:
             pass
     
@@ -2263,6 +2271,9 @@ async def start_runtime() -> None:
         logger.info(f"Starting {agent.role} agent {agent.agent_id}")
         await agent.start()
     
+    # Start stream cleanup manager
+    await start_cleanup_manager()
+    
     _runtime_started = True
     logger.info("Runtime started successfully")
 
@@ -2293,6 +2304,9 @@ async def stop_runtime() -> None:
     
     # Generate final statistics before stopping agents
     _generate_exit_statistics()
+    
+    # Stop stream cleanup manager first
+    await stop_cleanup_manager()
     
     for agent in _agent_registry:
         logger.info(f"Stopping {agent.role} agent {agent.agent_id}")
