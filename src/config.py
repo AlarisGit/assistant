@@ -22,7 +22,7 @@ else:
     sys.exit(1)
 
 # --- Version ---
-VERSION = os.getenv("VERSION", "2.1.0")
+VERSION = os.getenv("VERSION", "2.2.0")
 
 # --- Logging ---
 LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper()

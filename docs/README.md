@@ -1,18 +1,22 @@
-# Alaris Assistant - Documentation
+# Alaris Assistant - Production-Grade Agentic Framework
 
-This directory contains all documentation for the Alaris Assistant agentic system.
+This directory contains comprehensive documentation for the Alaris Assistant production-grade agentic system built on Redis Streams with enterprise-level reliability and concurrent processing capabilities.
 
 ## Documentation Index
 
 ### Core Architecture
-- **[AGENTIC_ARCHITECTURE.md](AGENTIC_ARCHITECTURE.md)** - Comprehensive system architecture overview
-- **[MEMORY_SYSTEM.md](MEMORY_SYSTEM.md)** - Distributed memory subsystem documentation
+- **[AGENTIC_ARCHITECTURE.md](AGENTIC_ARCHITECTURE.md)** - Complete system architecture and design patterns
+- **[CONCURRENT_PROCESSING.md](CONCURRENT_PROCESSING.md)** - Concurrent processing and scaling guide
+- **[MEMORY_SYSTEM.md](MEMORY_SYSTEM.md)** - Distributed memory subsystem with conversation isolation
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** - Development guidelines and best practices
 
 ### Quick Start
-1. Review the [Agentic Architecture](AGENTIC_ARCHITECTURE.md) to understand the system design
-2. Check the [Memory System](MEMORY_SYSTEM.md) for context management patterns
-3. Explore the [examples/](../examples/) directory for working demonstrations
-4. Run tests from the [tests/](../tests/) directory to verify functionality
+1. **Architecture Overview**: Read [Agentic Architecture](AGENTIC_ARCHITECTURE.md) for system design principles
+2. **Concurrent Processing**: Review [Concurrent Processing Guide](CONCURRENT_PROCESSING.md) for scaling patterns
+3. **Memory Management**: Check [Memory System](MEMORY_SYSTEM.md) for conversation context patterns  
+4. **Development Setup**: Follow [Development Guide](DEVELOPMENT.md) for local setup
+5. **Live Demo**: Run `python src/assistant.py` for interactive demonstration
+6. **Production Bot**: Configure `TELEGRAM_BOT_TOKEN` for concurrent user handling
 
 ### System Components
 
@@ -24,11 +28,13 @@ This directory contains all documentation for the Alaris Assistant agentic syste
 - `config.py` - Configuration management with environment variables
 
 #### Key Features
-- **Production-grade Redis Streams** communication with connection pooling
-- **Distributed memory system** for conversation context across processes/hosts
-- **Safety systems** with circuit breakers and comprehensive monitoring
-- **Zero-config agents** with automatic role derivation
-- **Horizontal scaling** with load balancing and backpressure management
+- **🚀 Concurrent Processing** - Multiple users handled simultaneously with non-blocking Telegram bot
+- **⚡ Scalable LLM Integration** - Multiple agent instances for parallel API calls (2+ concurrent requests)
+- **🛡️ Production-grade Safety** - Circuit breakers, self-loop detection, automatic error recovery
+- **🔄 Redis Streams Architecture** - Enterprise connection pooling (50 connections) with health monitoring
+- **💾 Distributed Memory System** - Conversation isolation across processes/hosts with automatic cleanup
+- **📊 Zero-config Agents** - Automatic role derivation and registration with intelligent defaults
+- **🔧 Horizontal Scaling** - Load balancing and backpressure management for production workloads
 
 ### Development
 
@@ -45,29 +51,60 @@ assistant/
 └── log/           # Log files
 ```
 
-#### Running Examples
+#### Running the System
 ```bash
+# Interactive assistant demo with concurrent processing
+python src/assistant.py
+
+# Telegram bot with production-grade concurrent handling
+python src/tg.py  # Requires TELEGRAM_BOT_TOKEN in environment
+
 # Memory system demonstration
 python examples/memory_system_demo.py
-
-# Main assistant demo
-python src/assistant.py
 ```
 
-#### Running Tests
+#### Configuration
 ```bash
-# Distributed cleanup test
-python tests/test_distributed_cleanup.py
+# Essential environment variables
+export REDIS_HOST=localhost
+export REDIS_PORT=6379
+export REDIS_MAX_CONNECTIONS=50
+
+# LLM provider configuration
+export OPENAI_API_KEY=your_key_here
+export GOOGLE_API_KEY=your_key_here
+export GEN_MODEL=gpt-4@openai  # or gemini-2.5-flash@google
+
+# Telegram bot (optional)
+export TELEGRAM_BOT_TOKEN=your_bot_token
 ```
 
-### Architecture Highlights
+### Production Architecture Highlights
 
-The Alaris Assistant is a production-grade agentic system built on Redis Streams with:
+The Alaris Assistant is an enterprise-grade agentic system featuring:
 
-- **Enterprise-level reliability** - Connection pooling, health monitoring, automatic cleanup
-- **Stateless agent design** - All context stored in distributed memory system
-- **Horizontal scalability** - Multiple agents per role across hosts
-- **Comprehensive monitoring** - Detailed statistics and performance tracking
-- **Developer-friendly** - Zero-config agents with intuitive interfaces
+#### 🏗️ **Concurrent Processing Architecture**
+- **Non-blocking Telegram Bot**: Multiple users processed simultaneously
+- **Parallel LLM Calls**: 2+ concurrent API requests with automatic load balancing
+- **Redis Streams Foundation**: Enterprise connection pooling with 50+ connections
+- **Horizontal Scaling**: Multiple agent instances per role across processes/hosts
 
-Ready for production SMS assistant deployments with sophisticated conversation management and context sharing capabilities.
+#### 🛡️ **Production Safety & Reliability**
+- **Circuit Breakers**: Automatic protection against infinite loops and resource exhaustion
+- **Self-Loop Detection**: Immediate prevention of routing errors
+- **Graceful Error Recovery**: Comprehensive fallback mechanisms with structured error handling
+- **Automatic Cleanup**: Signal-based shutdown handling for all termination scenarios
+
+#### 💾 **Distributed Memory & Logging**
+- **Conversation Isolation**: Each conversation has dedicated memory space and log files
+- **Cross-Process Context**: Memory accessible across all agent instances and hosts
+- **Hierarchical Logging**: Day-based organization with conversation-specific debug files
+- **Automatic TTL Management**: Memory cleanup with configurable expiration policies
+
+#### 🚀 **Developer Experience**
+- **Zero-Config Agents**: Automatic role derivation from class names (ManagerAgent → "manager")
+- **Simplified APIs**: `env.final()` method encapsulates complex routing logic
+- **Hot-Pluggable Agents**: Dynamic registration with runtime agent creation
+- **Comprehensive Documentation**: Production-ready with detailed architecture guides
+
+**Ready for production SMS assistant deployments with sophisticated conversation management, concurrent user handling, and enterprise-level reliability.**
