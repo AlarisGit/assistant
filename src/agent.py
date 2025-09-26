@@ -1026,15 +1026,16 @@ class BaseAgent:
         # Get or create conversation start timestamp from distributed memory
         start_ts = await self._get_start_ts(conversation_id)
         
-        # Format: CONFIG.LOG_DIR/conversations/conversation_id/start_timestamp.log
-        conversations_dir = Path(config.LOG_DIR) / "conversations" / conversation_id
-        conversations_dir.mkdir(parents=True, exist_ok=True)
-        
         # Format timestamp as YYYY-MM-DD_HH-MM-SS for filename
         start_datetime = datetime.fromtimestamp(start_ts)
-        timestamp_str = start_datetime.strftime("%Y-%m-%d_%H-%M-%S")
+        timestamp_str = start_datetime.strftime("%H:%M:%S")
+        day_str = start_datetime.strftime("%Y.%m.%d")
         
-        return conversations_dir / f"{timestamp_str}.log", start_ts
+        # Format: CONFIG.LOG_DIR/conversations/conversation_id/YYYYMMDD/HHMMSS.log
+        conversation_day_dir = Path(config.LOG_DIR) / "conversations" / conversation_id / day_str
+        conversation_day_dir.mkdir(parents=True, exist_ok=True)
+        
+        return conversation_day_dir / f"{timestamp_str}.log", start_ts
     
     async def log(self, conversation_id: str, message: str) -> None:
         """Log a message to the conversation-specific log file.
@@ -1335,9 +1336,10 @@ class BaseAgent:
         await self._report_envelope_completion(env, trace_item['duration'])
         
         logger.info(f"Outgoing: {env}")
-        
+
+   
         # Check for self-loop (agent targeting itself) - immediate infinite loop prevention
-        if env.target_role == self.role and env.target_agent_id is None:
+        if config.AGENT_SELF_LOOP_DISABLED and env.target_role == self.role and env.target_agent_id is None:
             error_message = f"Self-loop detected: agent '{self.role}' targeting itself (infinite loop prevention)"
             logger.error(f"[{self.role}:{self.agent_id}] {error_message}")
             await self.log_envelope(env, "self_loop_error", error_message)

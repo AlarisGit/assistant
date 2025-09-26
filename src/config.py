@@ -158,6 +158,8 @@ STREAM_MESSAGE_EXPIRATION_SEC = int(os.getenv("STREAM_MESSAGE_EXPIRATION_SEC", s
 # How often to run stream cleanup (remove expired messages)
 STREAM_CLEANUP_INTERVAL_SEC = int(os.getenv("STREAM_CLEANUP_INTERVAL_SEC", "30"))
 
+AGENT_SELF_LOOP_DISABLED = os.getenv("AGENT_SELF_LOOP_DISABLED", "true").lower() in ["true", "1", "yes", "y"]
+
 logger.info("Configuration loaded.")
 
 # --- Rate limiting and metrics ---
