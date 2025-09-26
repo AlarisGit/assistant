@@ -257,7 +257,8 @@ class TranslationAgent(BaseAgent):
 _manager = ManagerAgent()
 _command = CommandAgent()
 _lang = LangAgent()
-_samplellm = SampleLLMAgent()
+_samplellm1 = SampleLLMAgent()
+_samplellm2 = SampleLLMAgent()
 _translate = TranslationAgent()
 
 # Direct function implementations (no proxy class needed)

@@ -269,7 +269,22 @@ class TelegramBot:
                 "🤔 Thinking..."
             )
             
-
+            # 🚀 NON-BLOCKING: Process message in background task
+            asyncio.create_task(self._process_message_async(user_id, message_text, thinking_message))
+            
+        except Exception as e:
+            logger.error(f"Error in handle_message: {str(e)}")
+            try:
+                await self._retry_with_backoff(
+                    update.message.reply_text,
+                    "❌ Sorry, I encountered an error processing your message."
+                )
+            except Exception as reply_error:
+                logger.error(f"Failed to send error message: {str(reply_error)}")
+    
+    async def _process_message_async(self, user_id: str, message_text: str, thinking_message):
+        """Process message asynchronously and update the thinking message."""
+        try:
             response = await assistant.process_user_message(user_id, message_text)
             message = response.get("message", None)
             if not message:
@@ -277,149 +292,139 @@ class TelegramBot:
             image_urls = None
 
             # Replace "Thinking..." message with text response
-            message_sent = False
-            try:
-                # Telegram message limit is 4096 characters
-                MAX_MESSAGE_LENGTH = 4000  # Leave some buffer for HTML tags
-                
-
-                if len(message) <= MAX_MESSAGE_LENGTH:
-                    # Message fits in one piece
-                    await self._retry_with_backoff(
-                        thinking_message.edit_text,
-                        message,
-                        parse_mode='HTML'
-                    )
-                    message_sent = True
-                else:
-                    # Message is too long, need to split
-                    await self._retry_with_backoff(thinking_message.delete)
-                    
-                    # Split message into chunks
-                    chunks = []
-                    current_chunk = ""
-                    
-                    # Split by paragraphs first
-                    paragraphs = message.split('\n\n')
-                    
-                    for paragraph in paragraphs:
-                        if len(current_chunk + paragraph + '\n\n') <= MAX_MESSAGE_LENGTH:
-                            current_chunk += paragraph + '\n\n'
-                        else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                                current_chunk = paragraph + '\n\n'
-                            else:
-                                # Single paragraph is too long, split by sentences
-                                sentences = paragraph.split('. ')
-                                for i, sentence in enumerate(sentences):
-                                    sentence_with_period = sentence + ('. ' if i < len(sentences) - 1 else '')
-                                    if len(current_chunk + sentence_with_period) <= MAX_MESSAGE_LENGTH:
-                                        current_chunk += sentence_with_period
-                                    else:
-                                        if current_chunk:
-                                            chunks.append(current_chunk.strip())
-                                        current_chunk = sentence_with_period
-                                current_chunk += '\n\n'
-                    
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                    
-                    # Send chunks as separate messages with retry logic
-                    for i, chunk in enumerate(chunks):
-                        chunk_text = f"📄 Part {i+1} of {len(chunks)}:\n\n{chunk}"
-                        
-                        await self._retry_with_backoff(
-                            context.bot.send_message,
-                            chat_id=update.effective_chat.id, 
-                            text=chunk_text, 
-                            parse_mode='HTML'
-                        )
-                    message_sent = True
-                        
-            except Exception as html_error:
-                logger.error(f"HTML parsing error: {str(html_error)}")
-                # Fallback: send as plain text without HTML formatting
-                plain_message = message.replace('<a href="', '').replace('">', ' (').replace('</a>', ')')
-                
-                try:
-                    # Check length for plain text too
-                    if len(plain_message) <= MAX_MESSAGE_LENGTH:
-                        if not message_sent:
-                            await self._retry_with_backoff(
-                                thinking_message.edit_text,
-                                plain_message
-                            )
-                        else:
-                            await self._retry_with_backoff(
-                                context.bot.send_message,
-                                chat_id=update.effective_chat.id, 
-                                text=plain_message
-                            )
-                    else:
-                        if not message_sent:
-                            await self._retry_with_backoff(thinking_message.delete)
-                        await self._retry_with_backoff(
-                            context.bot.send_message,
-                            chat_id=update.effective_chat.id, 
-                            text=plain_message[:MAX_MESSAGE_LENGTH] + "...\n\n[The message was truncated due to length limit]"
-                        )
-                except Exception as fallback_error:
-                    logger.error(f"Fallback error: {str(fallback_error)}")
-                    # Last resort: send a simple error message with retry
-                    try:
-                        await self._retry_with_backoff(
-                            context.bot.send_message,
-                            chat_id=update.effective_chat.id, 
-                            text="Sorry, an error occurred while sending the message. Please try again."
-                        )
-                    except Exception as final_error:
-                        logger.error(f"Final fallback failed: {str(final_error)}")
-                        pass  # Give up gracefully
-            
-            # If we have images, send them as a separate media group without captions
-            if image_urls:
-                try:
-                    # Prepare media group with images (no captions)
-                    media = [InputMediaPhoto(media=url) for url in image_urls[:10]]  # Telegram limit: max 10 images
-                    
-                    # Send media group separately with retry logic
-                    await self._retry_with_backoff(
-                        context.bot.send_media_group,
-                        chat_id=update.effective_chat.id,
-                        media=media
-                    )
-                    
-                except Exception as img_error:
-                    logger.error(f"Error sending images: {str(img_error)}")
-                    # Images failed to send, but text was already sent successfully
-            
-            logger.info(f"Sent response to user {user_id}: {message[:100]}...")
+            await self._send_response_message(thinking_message, message, image_urls, user_id)
             
         except Exception as e:
-            logger.error(f"Error handling message: {str(e)}")
-            # Try to edit the thinking message if it exists, otherwise send new message
+            logger.error(f"Error in _process_message_async: {str(e)}")
+            # Try to edit the thinking message with error
             try:
-                if 'thinking_message' in locals():
-                    await self._retry_with_backoff(
-                        thinking_message.edit_text,
-                        "I apologize, but I encountered an error while processing your message. Please try again."
-                    )
-                else:
-                    await self._retry_with_backoff(
-                        update.message.reply_text,
-                        "I apologize, but I encountered an error while processing your message. Please try again."
-                    )
+                await self._retry_with_backoff(
+                    thinking_message.edit_text,
+                    "I apologize, but I encountered an error while processing your message. Please try again."
+                )
             except Exception as edit_error:
-                logger.error(f"Error editing message: {str(edit_error)}")
-                # Fallback: send new message if editing fails
+                logger.error(f"Error editing thinking message with error: {str(edit_error)}")
+    
+    async def _send_response_message(self, thinking_message, message, image_urls, user_id):
+        """Send the response message, handling long messages and images."""
+        message_sent = False
+        try:
+            # Telegram message limit is 4096 characters
+            MAX_MESSAGE_LENGTH = 4000  # Leave some buffer for HTML tags
+            
+
+            if len(message) <= MAX_MESSAGE_LENGTH:
+                # Message fits in one piece
+                await self._retry_with_backoff(
+                    thinking_message.edit_text,
+                    message,
+                    parse_mode='HTML'
+                )
+                message_sent = True
+            else:
+                # Message is too long, need to split
+                await self._retry_with_backoff(thinking_message.delete)
+                
+                # Split message into chunks
+                chunks = []
+                current_chunk = ""
+                
+                # Split by paragraphs first
+                paragraphs = message.split('\n\n')
+                
+                for paragraph in paragraphs:
+                    if len(current_chunk + paragraph + '\n\n') <= MAX_MESSAGE_LENGTH:
+                        current_chunk += paragraph + '\n\n'
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                            current_chunk = paragraph + '\n\n'
+                        else:
+                            # Single paragraph is too long, split by sentences
+                            sentences = paragraph.split('. ')
+                            for i, sentence in enumerate(sentences):
+                                sentence_with_period = sentence + ('. ' if i < len(sentences) - 1 else '')
+                                if len(current_chunk + sentence_with_period) <= MAX_MESSAGE_LENGTH:
+                                    current_chunk += sentence_with_period
+                                else:
+                                    if current_chunk:
+                                        chunks.append(current_chunk.strip())
+                                    current_chunk = sentence_with_period
+                            current_chunk += '\n\n'
+                
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                
+                # Send chunks as separate messages with retry logic
+                for i, chunk in enumerate(chunks):
+                    chunk_text = f"📄 Part {i+1} of {len(chunks)}:\n\n{chunk}"
+                    
+                    await self._retry_with_backoff(
+                        thinking_message.get_bot().send_message,
+                        chat_id=thinking_message.chat_id, 
+                        text=chunk_text, 
+                        parse_mode='HTML'
+                    )
+                message_sent = True
+                    
+        except Exception as html_error:
+            logger.error(f"HTML parsing error: {str(html_error)}")
+            # Fallback: send as plain text without HTML formatting
+            plain_message = message.replace('<a href="', '').replace('">', ' (').replace('</a>', ')')
+            
+            try:
+                # Check length for plain text too
+                if len(plain_message) <= MAX_MESSAGE_LENGTH:
+                    if not message_sent:
+                        await self._retry_with_backoff(
+                            thinking_message.edit_text,
+                            plain_message
+                        )
+                    else:
+                        await self._retry_with_backoff(
+                            thinking_message.get_bot().send_message,
+                            chat_id=thinking_message.chat_id, 
+                            text=plain_message
+                        )
+                else:
+                    if not message_sent:
+                        await self._retry_with_backoff(thinking_message.delete)
+                    await self._retry_with_backoff(
+                        thinking_message.get_bot().send_message,
+                        chat_id=thinking_message.chat_id, 
+                        text=plain_message[:MAX_MESSAGE_LENGTH] + "...\n\n[The message was truncated due to length limit]"
+                    )
+            except Exception as fallback_error:
+                logger.error(f"Fallback error: {str(fallback_error)}")
+                # Last resort: send a simple error message with retry
                 try:
                     await self._retry_with_backoff(
-                        update.message.reply_text,
-                        "I apologize, but I encountered an error while processing your message. Please try again."
+                        thinking_message.get_bot().send_message,
+                        chat_id=thinking_message.chat_id, 
+                        text="Sorry, an error occurred while sending the message. Please try again."
                     )
-                except Exception as final_fallback_error:
-                    logger.error(f"All message sending attempts failed: {str(final_fallback_error)}")
+                except Exception as final_error:
+                    logger.error(f"Final fallback failed: {str(final_error)}")
+                    pass  # Give up gracefully
+        
+        # If we have images, send them as a separate media group without captions
+        if image_urls:
+            try:
+                # Prepare media group with images (no captions)
+                media = [InputMediaPhoto(media=url) for url in image_urls[:10]]  # Telegram limit: max 10 images
+                
+                # Send media group separately with retry logic
+                await self._retry_with_backoff(
+                    thinking_message.get_bot().send_media_group,
+                    chat_id=thinking_message.chat_id,
+                    media=media
+                )
+                
+            except Exception as img_error:
+                logger.error(f"Error sending images: {str(img_error)}")
+                # Images failed to send, but text was already sent successfully
+        
+        logger.info(f"Sent response to user {user_id}: {message[:100]}...")
     
     async def run(self):
         """Start the bot with automatic reconnection."""
