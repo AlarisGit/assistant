@@ -939,11 +939,19 @@ class BaseAgent:
     async def stop(self) -> None:
         """Request graceful stop and emit 'exit'."""
         self._shutdown_requested = True
+        
+        # Publish exit status BEFORE stopping tasks to avoid connection issues
+        try:
+            await self._publish_status("exit")
+        except Exception as e:
+            logger.debug(f"[{self.role}:{self.agent_id}] Error publishing exit status: {e}")
+        
+        # Stop all background tasks
         self._stop.set()
         for t in (self._t_role, self._t_direct, self._t_broadcast, self._t_heartbeat):
             if t:
                 t.cancel()
-        await self._publish_status("exit")
+                
         logger.info(f"Stopped {self.role} agent {self.agent_id}")
 
     # ---- abstract worker ----
@@ -1440,7 +1448,11 @@ class BaseAgent:
         }
         channel = role_broadcast_channel(STATUS_ROLE)
         logger.debug(f"[{self.role}:{self.agent_id}] Publishing status to {channel}: {payload}")
-        await self.redis.publish(channel, json.dumps(payload, ensure_ascii=False))
+        try:
+            await self.redis.publish(channel, json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            # Don't let Redis connection errors break agent lifecycle
+            logger.debug(f"[{self.role}:{self.agent_id}] Error publishing status '{event}': {e}")
 
 # -------------------------- Concrete agents --------------------------
 
@@ -2414,9 +2426,9 @@ async def process_request(role: str, conversation_id: str, payload: dict) -> str
         else:
             _, result_json = br
             result_env = Envelope(**json.loads(result_json.decode('utf-8')))
-            logger.info(f"[process_request] Received final result for {message_id}: '{result_env.payload.get('text', 'No result')}'")
+            logger.info(f"[process_request] Received final result for {message_id}: '{result_env.payload.get('response', 'No result')}'")
             logger.info(result_env)
-            result = result_env.payload.get("text", "No result received")
+            result = result_env.payload.get("response", "No result received")
             
     except asyncio.CancelledError:
         logger.info(f"[process_request] Request {message_id} cancelled")

@@ -696,7 +696,7 @@ def get_embedding(text: str, model_provider: str = config.EMB_MODEL, prompt_opti
     return provider.generate_embedding(emb_text, model)
 
 def generate_text(action: str, text: str = '', history: List[Tuple[str, str]] = [], image: str = '',
-                model_provider: str = config.RSP_MODEL, prompt_options: Optional[Dict[str, Any]] = None, **kwargs) -> str:
+                model_provider: str = config.GEN_MODEL, prompt_options: Optional[Dict[str, Any]] = None, **kwargs) -> str:
     """Generate text response using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
     

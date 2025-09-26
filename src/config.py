@@ -118,7 +118,7 @@ EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-large@openai")
 EMB_DIM = int(os.getenv("EMB_DIM", 1024 if EMB_MODEL.endswith("@ollama") else 3072))
 #VSN_MODEL = os.getenv("VSN_MODEL", "llava:7b@ollama")
 VSN_MODEL = os.getenv("VSN_MODEL", "gemma3:27b@ollama")
-RSP_MODEL = os.getenv("RSP_MODEL", "gpt-5-nano@openai")
+GEN_MODEL = os.getenv("GEN_MODEL", "gpt-5-nano@openai")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")

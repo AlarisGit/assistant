@@ -138,17 +138,22 @@ class ManagerAgent(BaseAgent):
             return env
         
         if stage == "lang":
-            env.payload['text'] = f"Detected language: {env.payload.get("language", "en")}"
-            await self.log(env.conversation_id, f"Detected language: {env.payload.get("language", "en")}")
+            env.target_role = "samplellm"
+            env.payload["stage"] = "response"
+            return env
+        
+        if stage == "response":
             env.target_role = "manager"
             env.payload["stage"] = "final"
             return env
             
         if stage == 'final':
-            await memory.add_message("assistant", env.payload['text'], {"message_id": env.message_id})
-            await self.log(env.conversation_id, f"Added assistant message to history: {env.payload['text']}")
+            if 'response' not in env.payload or not env.payload['response']:
+                env.payload['response'] = f"No response"
+            await memory.add_message("assistant", env.payload['response'], {"message_id": env.message_id})
+            await self.log(env.conversation_id, f"Added assistant message to history: {env.payload['response']}")
             message_count = await memory.get_message_count()
-            await self.log(env.conversation_id, f"Pipeline complete: final_length={len(env.payload.get("text", ""))} chars total_messages={message_count}")
+            await self.log(env.conversation_id, f"Pipeline complete: final_length={len(env.payload.get("response", ""))} chars total_messages={message_count}")
             return env.final()
         
         # Unknown stage - return error
@@ -157,6 +162,36 @@ class ManagerAgent(BaseAgent):
             "message": f"Unknown stage '{stage}'",
         })
         return env.final()
+
+class SampleAgent(BaseAgent):
+    """Sample agent for testing purposes."""
+    
+    async def process(self, env: Envelope) -> Envelope:
+        await self.log(env.conversation_id, f"Processing text: {env.payload.get("text", "")}")
+        env.payload["text"] = f"Sample agent processed: {env.payload.get("text", "")}"
+        return env
+
+class SampleLLMAgent(BaseAgent):
+    """Sample agent for testing purposes."""
+    
+    async def process(self, env: Envelope) -> Envelope:
+        await self.log(env.conversation_id, f"Processing text: {env.payload.get("text", "")}")
+        memory = await self.get_memory(env.conversation_id)
+        history = []
+        pair = {}
+        for message in await memory.get_messages(limit=10):
+            role = message.get("role", 'unknown')
+            content = message.get("content", '')
+            pair[role] = content
+            if 'user' in pair and 'assistant' in pair:
+                history.append((pair['user'], pair['assistant']))
+                pair = {}
+        # Get language from payload (set by LangAgent) or default to 'en'
+        language = env.payload.get("language", "en")
+        prompt_options = {'language': language}
+        env.payload["response"] = llm.generate_text('sample', env.payload.get("text", ""), history, prompt_options=prompt_options)
+        return env
+
 
 class LangAgent(BaseAgent):
     """Language detection agent using conversation history.
@@ -222,6 +257,7 @@ class TranslationAgent(BaseAgent):
 _manager = ManagerAgent()
 _command = CommandAgent()
 _lang = LangAgent()
+_samplellm = SampleLLMAgent()
 _translate = TranslationAgent()
 
 # Direct function implementations (no proxy class needed)
