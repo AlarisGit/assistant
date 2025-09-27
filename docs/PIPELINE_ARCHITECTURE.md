@@ -1,4 +1,4 @@
-# RAG Assistant Agent Architecture
+# RAG Assistant Pipeline Architecture
 
 ## Overview
 
@@ -108,8 +108,7 @@ This ensures:
 - **Reads**:
   - `stage` - Current pipeline stage for routing decisions
   - `language` - Detected user language from LangAgent
-  - `needs_translation` - Boolean indicating if translation was needed
-  - `guardrails_routing` - Guardrails decision: "proceed", "clarify", or "reject"
+  - `within_scope` - Boolean indicating if query is within documentation scope
   - `search_quality` - Search result quality: "excellent", "good", or "poor"
   - `needs_clarification` - Boolean indicating if ANY agent needs clarification (universal)
   - `clarification_reason` - Reason code from clarifying agent (universal)
@@ -448,7 +447,7 @@ env.target_role = "other"       # FORBIDDEN (except ManagerAgent)
 
 **Language Processing Chain:**
 ```
-text → language, confidence, needs_translation → english_query, original_query → canonical_question
+text → language, confidence → text_eng → canonical_question
 ```
 
 **Search and Context Chain:**
@@ -461,456 +460,87 @@ canonical_question → search_results, search_context → augmented_prompt → r
 guardrails_routing → search_quality → needs_clarification → quality_decision
 ```
 
+## Pipeline Flow Diagram
+
+```mermaid
+graph TD
+    A[User Query] --> B[ManagerAgent<br/>Stage: lang]
+    B --> C[LangAgent<br/>Detect Language]
+    C --> D[ManagerAgent<br/>Stage: translation]
+    D --> E[TranslationAgent<br/>Normalize to English]
+    E --> F[ManagerAgent<br/>Stage: essence]
+    F --> G[EssenceAgent<br/>Extract Canonical Question]
+    
+    G --> H[ManagerAgent<br/>Stage: guardrails]
+    H --> I[GuardrailsAgent<br/>Scope Analysis]
+    
+    I --> J{Within Scope?}
+    J -->|No| K[ManagerAgent<br/>Route to Clarification]
+    J -->|Yes| L[ManagerAgent<br/>Stage: search]
+    
+    L --> M[SearchAgent<br/>Multi-level Search]
+    M --> N{Search Quality?}
+    N -->|Poor| K
+    N -->|Good| O[ManagerAgent<br/>Stage: augmentation]
+    
+    O --> P[AugmentationAgent<br/>Build Context Prompt]
+    P --> Q[ManagerAgent<br/>Stage: response]
+    Q --> R[ResponseAgent<br/>Generate Response]
+    
+    R --> S{Documentation<br/>Sufficient?}
+    S -->|No| K
+    S -->|Yes| T[ManagerAgent<br/>Stage: quality]
+    
+    T --> U[QualityAgent<br/>Validate Response]
+    U --> V{Quality Check}
+    V -->|Poor User Details| K
+    V -->|Pipeline Issue| W[ManagerAgent<br/>Retry Pipeline]
+    V -->|Approved| X[ManagerAgent<br/>Stage: final]
+    
+    K --> Y[ClarificationAgent<br/>Compose Message]
+    Y --> Z[User Response]
+    
+    W --> L
+    X --> AA[Final Response to User]
+    Z --> B
+    
+    style A fill:#e1f5fe
+    style AA fill:#e8f5e8
+    style Y fill:#fff3e0
+    style B fill:#f3e5f5
+    style D fill:#f3e5f5
+    style F fill:#f3e5f5
+    style H fill:#f3e5f5
+    style K fill:#f3e5f5
+    style L fill:#f3e5f5
+    style O fill:#f3e5f5
+    style Q fill:#f3e5f5
+    style T fill:#f3e5f5
+    style W fill:#f3e5f5
+    style X fill:#f3e5f5
+```
+
+### Pipeline Decision Points
+
+**🔄 Universal Clarification Triggers:**
+- **EssenceAgent**: Query too short or ambiguous
+- **GuardrailsAgent**: Out of documentation scope
+- **SearchAgent**: Poor search results quality
+- **ResponseAgent**: Insufficient documentation context
+- **QualityAgent**: Poor response due to insufficient user details
+
+**🎯 ManagerAgent Routing Logic:**
+- Detects `needs_clarification = true` from any agent
+- Routes to ClarificationAgent for user-friendly message composition
+- Handles pipeline retries for quality issues
+- Orchestrates entire conversation flow
+
 ### Attribute Naming Conventions
 
-- **Input Attributes**: `text`, `canonical_question`, `english_query`
+- **Input Attributes**: `text`, `canonical_question`, `text_eng`
 - **Analysis Results**: `language`, `confidence`, `search_quality`, `quality_score`
-- **Routing Decisions**: `needs_translation`, `guardrails_routing`, `needs_clarification`, `quality_decision`
-- **Generated Content**: `response`, `augmented_prompt`, `clarification_question`
+- **Routing Decisions**: `within_scope`, `needs_clarification`, `quality_decision`
+- **Generated Content**: `response`, `augmented_prompt`, `clarification_type`
 - **Metadata**: `source_references`, `search_stats`, `context_structure`
 - **Error Handling**: `search_error`, `generation_error`
 
-**Key Routing Decisions**:
-- Skip translation for English queries
-- Route to clarification based on search quality
-- Handle guardrails violations (reject/clarify/proceed)
-- Quality control returns (approve/clarify/research/regenerate)
-
-### 2. LangAgent
-**Role**: `lang`  
-**Purpose**: Language detection and normalization  
-**Instances**: 1 (fast language detection)
-
-**Responsibilities**:
-- Detect user's primary language from query and history
-- Calculate confidence scores for language detection
-- Determine if translation is needed for search optimization
-- Store language preferences in conversation memory
-
-**Envelope Attributes**:
-- **Reads**: `text` (user query), conversation history from memory
-- **Writes**: `language`, `confidence`, `needs_translation`
-
-**Input**: Raw user query + conversation history  
-**Output**: `language`, `confidence`, `needs_translation`
-
-**Supported Languages**: en, ru, zh, es, fr, de, and others based on conversation patterns
-
-### 3. TranslationAgent
-**Role**: `translation`  
-**Purpose**: Translate non-English queries to English for search optimization  
-**Instances**: 1 (translation services)
-
-**Responsibilities**:
-- Translate queries to English for optimal search performance
-- Preserve original query for response language matching
-- Handle technical terminology correctly
-- Maintain translation confidence scores
-
-**Envelope Attributes**:
-- **Reads**: `text`, `language`, `needs_translation`
-- **Writes**: `english_query`, `original_query`, `translation_confidence`
-
-**Input**: Non-English query + detected language  
-**Output**: `english_query`, `original_query`, `translation_confidence`
-
-**Note**: Only activated when `needs_translation = true` and `language != 'en'`
-
-### 4. ContextAgent
-**Role**: `context`  
-**Purpose**: Extract canonical question from conversation history  
-**Instances**: 1 (context extraction)
-
-**Responsibilities**:
-- Extract canonical question from conversation flow
-- Resolve pronouns and references ("it", "that feature", etc.)
-- Combine related questions from conversation history
-- Detect follow-up questions vs new topics
-- Clean and normalize queries for search
-
-**Envelope Attributes**:
-- **Reads**: `text`, `english_query` (if translated), conversation history from memory
-- **Writes**: `canonical_question`, `context_type`, `related_history`
-
-**Input**: Current query + conversation history  
-**Output**: `canonical_question`, `context_type`, `related_history`
-
-### 5. GuardrailsAgent
-**Role**: `guardrails`  
-**Purpose**: LLM-powered documentation scope enforcement  
-**Instances**: 1 (security checkpoint)
-
-**Responsibilities**:
-- Analyze query intent using LLM intelligence
-- Determine if queries are within documentation scope
-- Make intelligent routing decisions (proceed/clarify/reject)
-- Prevent access to general knowledge outside documentation
-- Generate appropriate rejection or clarification messages
-
-**Envelope Attributes**:
-- **Reads**: `canonical_question`, `domain_scope` (from config)
-- **Writes**: `within_scope`, `guardrails_routing`, `guardrails_message`, `guardrails_confidence`, `guardrails_analysis`
-
-**Input**: Canonical question + domain scope configuration  
-**Output**: `within_scope`, `guardrails_routing`, `guardrails_message`, `confidence`
-
-**Routing Decisions**:
-- `proceed`: Query is within scope, continue to search
-- `clarify`: Query is ambiguous, needs clarification
-- `reject`: Query is outside scope, provide rejection message
-
-### 6. SearchAgent
-**Role**: `search`  
-**Purpose**: Multi-level search across documentation using all metadata fields  
-**Instances**: 2 (concurrent search processing)
-
-**Responsibilities**:
-- **Level 1**: Keyword search using `keywords` field
-- **Level 2**: Semantic search using `chunks` embeddings
-- **Level 3**: Hierarchical search using `crumbs` navigation paths
-- **Level 4**: Summary search using `summary` and `keypoints`
-- Rank and merge results from all search levels
-- Assess search quality and coverage
-
-**Envelope Attributes**:
-- **Reads**: `canonical_question`, `english_query` (if available)
-- **Writes**: `search_results`, `search_context`, `search_stats`, `search_quality`, `search_error` (if any)
-
-**Input**: Canonical English query  
-**Output**: `search_results`, `result_sources`, `confidence_scores`, `search_quality`
-
-**Search Quality Assessment**:
-- `excellent`: High-confidence results with good coverage
-- `good`: Adequate results, proceed to response
-- `poor`: Low-quality results, trigger clarification
-
-### 7. ClarificationAgent
-**Role**: `clarification`  
-**Purpose**: Detect ambiguity and generate clarifying questions  
-**Instances**: 1 (ambiguity detection)
-
-**Responsibilities**:
-- Analyze search results for coverage and quality
-- Detect ambiguous terms and concepts
-- Use `crumbs` hierarchy for navigation suggestions
-- Generate contextual clarifying questions
-- Determine if user wants to continue or exit
-
-**Envelope Attributes**:
-- **Reads**: `search_results`, `search_stats`, `canonical_question`
-- **Writes**: `needs_clarification`, `clarification_reason`, `clarification_question`, `clarification_result`
-
-**Input**: Search results + query analysis + conversation context  
-**Output**: `needs_clarification`, `clarification_options`, `navigation_suggestions`, `clarification_result`
-
-**Clarification Results**:
-- `search_again`: User provided more info, research again
-- `exit`: User wants to end conversation
-
-### 8. AugmentationAgent
-**Role**: `augmentation`  
-**Purpose**: Craft enhanced LLM prompts with search context  
-**Instances**: 1 (prompt engineering)
-
-**Responsibilities**:
-- Build enhanced prompts with documentation context
-- Include source attribution from `source` URLs
-- Add breadcrumb navigation context from `crumbs`
-- Structure context for optimal LLM performance
-- Ensure all necessary context is included
-
-**Envelope Attributes**:
-- **Reads**: `search_results`, `search_context`, `canonical_question`, `language`, `original_query`
-- **Writes**: `augmented_prompt`, `source_references`, `context_structure`
-
-**Input**: Search results + user context + language preference  
-**Output**: `augmented_prompt`, `source_references`, `context_structure`
-
-### 9. ResponseAgent
-**Role**: `response`  
-**Purpose**: Generate final response using flagship LLM with constraints  
-**Instances**: 2 (concurrent LLM processing)
-
-**Responsibilities**:
-- Generate responses using flagship LLM (GPT-4, Gemini, etc.)
-- Enforce strict documentation-only constraints
-- Match user's preferred language
-- Include source references and navigation hints
-- Format responses appropriately for the domain
-
-**Envelope Attributes**:
-- **Reads**: `augmented_prompt`, `language`, `canonical_question`, conversation history from memory
-- **Writes**: `response`, `sources_used`, `generation_confidence`, `generation_error` (if any)
-
-**Input**: Augmented prompt + language preference + conversation history  
-**Output**: `response`, `sources_used`, `generation_confidence`
-
-**Constraints**:
-- Only use provided documentation context
-- No general knowledge beyond documentation
-- Include source attribution
-- Maintain professional tone appropriate for domain
-
-### 10. QualityAgent
-**Role**: `quality`  
-**Purpose**: Final response validation with return capability  
-**Instances**: 1 (quality control)
-
-**Responsibilities**:
-- Validate response accuracy against source documents
-- Check for information outside documentation scope
-- Detect potential hallucinations or knowledge leakage
-- Make routing decisions for response improvement
-- Ensure response completeness and clarity
-
-**Envelope Attributes**:
-- **Reads**: `response`, `search_context`, `canonical_question`, `source_references`
-- **Writes**: `quality_score`, `quality_decision`, `quality_analysis`, `validation_result`
-
-**Input**: Generated response + search context + original query  
-**Output**: `quality_score`, `quality_decision`, `validation_result`, `improvement_suggestions`
-
-**Quality Decisions**:
-- `approve`: Response is good, send to user
-- `clarify`: Response incomplete, need more info
-- `research`: Response inaccurate, search again
-- `regenerate`: Response has issues, generate again
-
-## State Machine Flow
-
-### Primary Flow States
-
-```
-start → lang → [translation] → context → guardrails → search → [clarification] → augmentation → response → quality → final
-```
-
-### Dynamic Routing Logic
-
-```python
-FLOW_DECISIONS = {
-    'start': ['lang'],
-    'lang': ['translation', 'context'],  # Skip translation if English
-    'translation': ['context'],
-    'context': ['guardrails'],
-    'guardrails': ['search', 'clarification', 'final'],  # LLM decides routing
-    'search': ['clarification', 'augmentation'],  # Based on result quality
-    'clarification': ['search', 'final'],  # User provides more info or exits
-    'augmentation': ['response'],
-    'response': ['quality'],
-    'quality': ['final', 'clarification', 'search', 'response']  # QC can return anywhere
-}
-```
-
-### Routing Decision Points
-
-1. **Language Detection** (`lang` → `translation`/`context`):
-   - If `needs_translation = true` and `language != 'en'` → `translation`
-   - Otherwise → `context`
-
-2. **Guardrails Analysis** (`guardrails` → `search`/`clarification`/`final`):
-   - If `guardrails_routing = 'proceed'` → `search`
-   - If `guardrails_routing = 'clarify'` → `clarification`
-   - If `guardrails_routing = 'reject'` → `final` (with rejection message)
-
-3. **Search Quality** (`search` → `clarification`/`augmentation`):
-   - If `search_quality = 'poor'` or `needs_clarification = true` → `clarification`
-   - Otherwise → `augmentation`
-
-4. **Clarification Result** (`clarification` → `search`/`final`):
-   - If `clarification_result = 'search_again'` → `search`
-   - If `clarification_result = 'exit'` → `final`
-
-5. **Quality Control** (`quality` → `final`/`clarification`/`search`/`response`):
-   - If `quality_decision = 'approve'` → `final`
-   - If `quality_decision = 'clarify'` → `clarification`
-   - If `quality_decision = 'research'` → `search`
-   - If `quality_decision = 'regenerate'` → `response`
-
-## Supported Scenarios
-
-### Scenario 1: Happy Path
-**Flow**: `start → lang → context → guardrails → search → augmentation → response → quality → final`
-
-**Description**: User asks a clear question within documentation scope, gets high-quality search results, and receives an accurate response.
-
-**Example**:
-- User: "How do I configure SMS routing rules?"
-- System finds relevant documentation and provides comprehensive answer
-
-### Scenario 2: Translation Required
-**Flow**: `start → lang → translation → context → guardrails → search → augmentation → response → quality → final`
-
-**Description**: User asks question in non-English language, system translates for search but responds in original language.
-
-**Example**:
-- User: "Как настроить маршрутизацию SMS?" (Russian)
-- System translates to English for search, responds in Russian
-
-### Scenario 3: Clarification Needed
-**Flow**: `start → lang → context → guardrails → search → clarification → search → augmentation → response → quality → final`
-
-**Description**: Initial search results are poor or ambiguous, system asks for clarification.
-
-**Example**:
-- User: "How do I set it up?"
-- System: "I found several setup procedures. Are you asking about initial system setup, user account setup, or routing configuration?"
-
-### Scenario 4: Guardrails Violation
-**Flow**: `start → lang → context → guardrails → final`
-
-**Description**: User asks question outside documentation scope, system politely declines.
-
-**Example**:
-- User: "What's the weather like today?"
-- System: "I can only help with questions related to the SMS platform documentation."
-
-### Scenario 5: Quality Control Return
-**Flow**: `start → ... → response → quality → clarification → search → augmentation → response → quality → final`
-
-**Description**: Generated response fails quality check, system gathers more information.
-
-**Example**:
-- Initial response is incomplete or inaccurate
-- Quality agent detects issues and routes back for improvement
-
-### Scenario 6: Multiple Clarification Rounds
-**Flow**: `start → ... → clarification → search → clarification → search → augmentation → response → quality → final`
-
-**Description**: Multiple rounds of clarification needed to understand user intent.
-
-**Example**:
-- User provides vague query
-- System asks for clarification multiple times to narrow down the topic
-
-### Scenario 7: User Exit During Clarification
-**Flow**: `start → ... → clarification → final`
-
-**Description**: User decides not to continue after clarification request.
-
-**Example**:
-- System asks for clarification
-- User indicates they don't want to continue
-
-## Agent Instance Configuration
-
-```python
-# Production agent instances
-_manager = ManagerAgent()           # 1 instance - FSM orchestration
-_command = CommandAgent()           # 1 instance - admin commands
-_lang = LangAgent()                # 1 instance - language detection
-_translation = TranslationAgent()   # 1 instance - translation services
-_context = ContextAgent()          # 1 instance - context extraction
-_guardrails = GuardrailsAgent()    # 1 instance - security enforcement
-_search1 = SearchAgent()           # 1st search instance
-_search2 = SearchAgent()           # 2nd search instance (concurrent)
-_clarification = ClarificationAgent() # 1 instance - ambiguity detection
-_augmentation = AugmentationAgent() # 1 instance - prompt crafting
-_response1 = ResponseAgent()       # 1st LLM instance (constrained)
-_response2 = ResponseAgent()       # 2nd LLM instance (concurrent)
-_quality = QualityAgent()          # 1 instance - quality validation
-```
-
-## Configuration Parameters
-
-### Environment Variables
-
-```bash
-# Domain Configuration (Industry-Agnostic)
-DOMAIN_NAME="Documentation Assistant"
-DOMAIN_SCOPE="product documentation and user guides"
-GUARDRAILS_STRICTNESS="medium"  # low/medium/high
-
-# LLM Configuration
-GEN_MODEL="gpt-4@openai"  # or gemini-2.5-flash@google
-GUARDRAILS_MODEL="gpt-4@openai"
-QUALITY_MODEL="gpt-4@openai"
-
-# Search Configuration
-SEARCH_RESULTS_LIMIT=10
-SEARCH_CONFIDENCE_THRESHOLD=0.3
-MAX_CONTEXT_LENGTH=4000
-
-# Flow Control
-MAX_CLARIFICATION_ROUNDS=3
-QUALITY_SCORE_THRESHOLD=0.7
-```
-
-### Industry-Specific Examples
-
-**SMS Platform**:
-```bash
-DOMAIN_NAME="SMS Platform Assistant"
-DOMAIN_SCOPE="SMS platform configuration, API documentation, and routing procedures"
-```
-
-**Healthcare**:
-```bash
-DOMAIN_NAME="Medical Device Assistant"
-DOMAIN_SCOPE="medical device operation procedures and safety guidelines"
-```
-
-**Finance**:
-```bash
-DOMAIN_NAME="Financial Services Assistant"
-DOMAIN_SCOPE="financial product documentation and compliance procedures"
-```
-
-## Error Handling and Fallbacks
-
-### Agent Failure Handling
-- Each agent has comprehensive error handling
-- Failures are logged with conversation-specific debugging
-- Default safe behaviors prevent infinite loops
-- Graceful degradation maintains user experience
-
-### Flow Control Safeguards
-- Maximum clarification rounds to prevent loops
-- Quality control timeout to avoid infinite improvement cycles
-- Guardrails fallback to safe rejection on analysis errors
-- Search fallback to basic keyword search on embedding failures
-
-### Memory and State Management
-- All conversation state stored in Envelope payload
-- Distributed memory for user preferences and statistics
-- Automatic cleanup of conversation data
-- TTL-based expiration for memory management
-
-## Performance Considerations
-
-### Concurrent Processing
-- Multiple instances for search and response agents
-- Load balancing via Redis consumer groups
-- Parallel processing where possible
-- Non-blocking pipeline flow
-
-### Caching Strategy
-- LLM response caching for repeated queries
-- Search result caching for common patterns
-- Translation caching for frequent language pairs
-- Quality analysis caching for similar responses
-
-### Monitoring and Metrics
-- Conversation-specific logging for debugging
-- Performance metrics for each agent
-- Flow analysis and bottleneck identification
-- Quality scores and user satisfaction tracking
-
-## Future Enhancements
-
-### Planned Improvements
-- Adaptive routing based on user behavior patterns
-- Machine learning for improved guardrails accuracy
-- Advanced context understanding with conversation graphs
-- Multi-modal support for images and documents
-
-### Scalability Considerations
-- Horizontal scaling of agent instances
-- Distributed deployment across multiple hosts
-- Load balancing and failover mechanisms
-- Performance optimization based on usage patterns
-
----
-
-**Last Updated**: 2025-09-27  
-**Version**: 1.0  
-**Status**: Architecture Design Complete
