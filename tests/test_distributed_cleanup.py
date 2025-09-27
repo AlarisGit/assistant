@@ -58,7 +58,6 @@ class CleanupTestAgent(BaseAgent):
             
             env.payload["result"] = f"Direct access: {message_count} messages, prefs: {user_prefs}"
         
-        env.kind = "result"
         return env
 
 

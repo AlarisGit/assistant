@@ -58,7 +58,6 @@ class MemoryDemoAgent(BaseAgent):
         # Return processed envelope
         env.payload["processed_by"] = "MemoryDemoAgent"
         env.payload["memory_demo_complete"] = True
-        env.kind = "result"
         
         return env
     
@@ -246,7 +245,6 @@ class ConversationManagerAgent(BaseAgent):
             
             logger.info(f"Processed conversation {env.conversation_id} (count: {process_count + 1})")
         
-        env.kind = "result"
         return env
 
 

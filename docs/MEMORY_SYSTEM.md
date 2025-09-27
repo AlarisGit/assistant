@@ -132,7 +132,6 @@ class ChatAgent(BaseAgent):
         context = self.build_context(recent_messages)
         
         env.payload["text"] = response
-        env.kind = "result"
         return env
 ```
 
@@ -359,7 +358,6 @@ class SMSAssistantAgent(BaseAgent):
         await memory.set("conversation_stats", stats)
         
         env.payload["text"] = response
-        env.kind = "result"
         return env
 ```
 

@@ -132,7 +132,7 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
 
 # Redis Connection Pool Configuration
-REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))  # Pool size
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "100"))  # Pool size
 REDIS_RETRY_ON_TIMEOUT = os.getenv("REDIS_RETRY_ON_TIMEOUT", "true").lower() == "true"
 REDIS_RETRY_ON_ERROR = os.getenv("REDIS_RETRY_ON_ERROR", "true").lower() == "true"
 REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "3"))
@@ -149,7 +149,7 @@ TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
-ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 60))
+ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 300))
 
 # Stream message expiration - messages older than this are considered stale
 # Should be same as ASSISTANT_TIMEOUT since that's the max time we wait for responses
