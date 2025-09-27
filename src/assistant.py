@@ -106,13 +106,14 @@ class CommandAgent(BaseAgent):
             elif language in config.SUPPORTED_LANGUAGES:
                 # Set to specific language
                 prefs["language"] = language
-                env.payload["response"] = "Language set successfully"
+                env.payload["response"] = f"Language set successfully to {language}"
             else:
                 # Invalid language code
                 env.payload["response"] = "Unsupported language"
                 # Don't change the preference for invalid input
                 return env.final()
             await memory.set("user_preferences", prefs)
+            await self.log(env.conversation_id, f"User preferences: {prefs}")
             return env.final()
 
         # Unknown action - return error
@@ -166,6 +167,11 @@ class ManagerAgent(BaseAgent):
             return env
         
         if stage == "lang":
+            env.target_role = "translation"
+            env.payload["stage"] = "translation"
+            return env
+
+        if stage == "translation":
             env.target_role = "samplellm"
             env.payload["stage"] = "response"
             return env
@@ -201,22 +207,13 @@ class SampleAgent(BaseAgent):
 
 class SampleLLMAgent(BaseAgent):
     """Sample agent for testing purposes."""
-    
     async def process(self, env: Envelope) -> Envelope:
         await self.log(env.conversation_id, f"Processing text: {env.payload.get("text", "")}")
         memory = await self.get_memory(env.conversation_id)
-        history = []
-        pair = {}
-        for message in await memory.get_messages(limit=10):
-            role = message.get("role", 'unknown')
-            content = message.get("content", '')
-            pair[role] = content
-            if 'user' in pair and 'assistant' in pair:
-                history.append((pair['user'], pair['assistant']))
-                pair = {}
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT)
         # Get language from payload (set by LangAgent) or default to 'en'
         language = env.payload.get("language", "en")
-        prompt_options = {'language': language}
+        prompt_options = {'language': config.SUPPORTED_LANGUAGES.get(language, "English")}
         env.payload["response"] = llm.generate_text('sample', env.payload.get("text", ""), history, prompt_options=prompt_options)
         return env
 
@@ -244,16 +241,16 @@ class LangAgent(BaseAgent):
         
         # Check user preferences first
         prefs = await memory.get("user_preferences", {})
-        preferred_lang = prefs.get("language")
+        preferred_language = prefs.get("language")
         
-        if preferred_lang is not None:
+        if preferred_language is not None:
             # User has explicitly set a language preference
-            lang = preferred_lang
+            language = preferred_language
             confidence = 1.0
-            await self.log(env.conversation_id, f"Using user preferred language: {lang}")
+            await self.log(env.conversation_id, f"Using user preferred language: {language}")
         else:
             # Auto-detect language from conversation history
-            lang = 'en'
+            language = 'en'
             confidence = 0.9
             messages = await memory.get_messages(limit=6)
             
@@ -274,22 +271,22 @@ class LangAgent(BaseAgent):
             await self.log(env.conversation_id, f"Analyzing combined text ({len(combined_text)} chars): {combined_text[:100]}...")
             
             if util._is_cyrillic_text(combined_text):
-                lang = 'ru'
+                language = 'ru'
                 confidence = 0.95
                 await self.log(env.conversation_id, f"Detected Russian: sufficient Cyrillic content in {len(combined_text)} characters")
             elif util._is_chinese_text(combined_text):
-                lang = 'zh'
+                language = 'zh'
                 confidence = 0.95
                 await self.log(env.conversation_id, f"Detected Chinese: sufficient Chinese content in {len(combined_text)} characters")
             else:
                 await self.log(env.conversation_id, f"Defaulting to English: insufficient non-Latin content in {len(combined_text)} characters")
             
-            await self.log(env.conversation_id, f"Auto-detected language: {lang}")
-        
-        await memory.set("language", lang)
-        env.payload["language"] = lang
+            await self.log(env.conversation_id, f"Auto-detected language: {language} ({config.SUPPORTED_LANGUAGES.get(language, "English")})")
+
+        await memory.set("language", language)
+        env.payload["language"] = language
         env.payload["confidence"] = confidence
-        await self.log(env.conversation_id, f"Final language: {lang} (confidence: {confidence})")
+        await self.log(env.conversation_id, f"Final language: {language} ({config.SUPPORTED_LANGUAGES.get(language, "English")}) (confidence: {confidence})")
  
         return env
 
@@ -310,29 +307,16 @@ class TranslationAgent(BaseAgent):
         """Process translation/normalization request.
         
         Reads: text, language
-        Writes: text_eng, translation_confidence, corrections_made
+        Writes: text_eng
         """
         # Extract input attributes
         text = env.payload.get("text", "")
         language = env.payload.get("language", "en")
-        
         await self.log(env.conversation_id, f"Translation/normalization: text='{text[:50]}...' language={language}")
-        
-        # TODO: Implement actual translation/spell-checking logic
-        # For now, create placeholder logic
-        if language != "en":
-            # Placeholder: In real implementation, call translation service
-            env.payload["text_eng"] = text  # TODO: Translate to English
-            env.payload["translation_confidence"] = 0.95  # TODO: Real confidence score
-            env.payload["corrections_made"] = False
-            await self.log(env.conversation_id, f"Translated from {language} to English")
-        else:
-            # Placeholder: In real implementation, call spell-checker/grammar-checker
-            env.payload["text_eng"] = text  # TODO: Spell-check and normalize
-            env.payload["translation_confidence"] = 1.0
-            env.payload["corrections_made"] = False  # TODO: Detect if corrections were made
-            await self.log(env.conversation_id, "Normalized English text")
-        
+        memory = await self.get_memory(env.conversation_id)
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT)
+        prompt_options = {'language': config.SUPPORTED_LANGUAGES.get(language, "English")}
+        env.payload["text_eng"] = llm.generate_text('translate', env.payload.get("text", ""), history, prompt_options=prompt_options)
         return env
 
 

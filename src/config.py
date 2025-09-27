@@ -150,6 +150,7 @@ TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
 
 ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 300))
+ASSISTANT_HISTORY_LIMIT = int(os.getenv("ASSISTANT_HISTORY_LIMIT", 10))
 
 # Stream message expiration - messages older than this are considered stale
 # Should be same as ASSISTANT_TIMEOUT since that's the max time we wait for responses
@@ -171,10 +172,10 @@ SUPPORTED_LANGUAGES = {
 }
 
 # Language detection thresholds
-LANG_DETECTION_MIN_LENGTH_CYRILLIC = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CYRILLIC", "15"))  # Increased from 10
-LANG_DETECTION_MIN_LENGTH_CHINESE = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CHINESE", "8"))     # Increased from 6
-LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC", "0.5"))  # Increased from 0.3
-LANG_DETECTION_MIN_PERCENTAGE_CHINESE = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CHINESE", "0.4"))    # Increased from 0.3
+LANG_DETECTION_MIN_LENGTH_CYRILLIC = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CYRILLIC", "15"))
+LANG_DETECTION_MIN_LENGTH_CHINESE = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CHINESE", "8"))
+LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC", "0.3"))
+LANG_DETECTION_MIN_PERCENTAGE_CHINESE = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CHINESE", "0.3"))
 
 logger.info("Configuration loaded.")
 

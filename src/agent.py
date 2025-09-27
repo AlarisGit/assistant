@@ -258,7 +258,7 @@ import signal
 import socket
 import time
 from dataclasses import dataclass, asdict, replace
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from datetime import datetime
 from pathlib import Path
 
@@ -617,6 +617,39 @@ class ConversationMemory:
     async def get_message_count(self) -> int:
         """Get the number of messages in conversation history."""
         return await self.list_length("messages")
+    
+    async def get_history(self, limit: Optional[int] = None) -> List[Tuple[str, str]]:
+        """Get conversation history as user-assistant pairs.
+        
+        Args:
+            limit: Maximum number of messages to process (default: all)
+            
+        Returns:
+            List of (user_content, assistant_content) tuples
+            
+        Example:
+            history = await memory.get_history(limit=10)
+            for user_msg, assistant_msg in history:
+                print(f"User: {user_msg}")
+                print(f"Assistant: {assistant_msg}")
+        """
+        messages = await self.get_messages(limit=limit)
+        history = []
+        pair = {}
+        
+        for message in messages:
+            role = message.get("role", "unknown")
+            content = message.get("content", "")
+            
+            if role in ["user", "assistant"]:
+                pair[role] = content
+                
+                # When we have both user and assistant messages, add to history
+                if "user" in pair and "assistant" in pair:
+                    history.append((pair["user"], pair["assistant"]))
+                    pair = {}
+        
+        return history
     
     # Utility methods
     
