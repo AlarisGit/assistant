@@ -82,7 +82,6 @@ class CommandAgent(BaseAgent):
             # Clear message history only, keep other memory intact
             await self.cleanup_message_history(env.conversation_id)
             logger.info(f"[CommandAgent] Cleared message history for conversation {env.conversation_id}")
-            
             env.payload["result"] = "Message history cleared successfully"
             return env.final()
         
@@ -90,8 +89,30 @@ class CommandAgent(BaseAgent):
             # Clear ALL conversation data (complete cleanup)
             await self.cleanup_memory(env.conversation_id)
             logger.info(f"[CommandAgent] Cleared ALL data for conversation {env.conversation_id}")
-            
             env.payload["result"] = "All conversation data cleared successfully"
+            return env.final()
+
+        elif action == "set_language":
+            language = env.payload["language"]
+            memory = await self.get_memory(env.conversation_id)
+            default_prefs = {
+                "language": None
+            }
+            prefs = await memory.get("user_preferences", default_prefs)
+            if language is None:
+                # Reset to default language
+                prefs["language"] = None
+                env.payload["response"] = "Language reset to default"
+            elif language in config.SUPPORTED_LANGUAGES:
+                # Set to specific language
+                prefs["language"] = language
+                env.payload["response"] = "Language set successfully"
+            else:
+                # Invalid language code
+                env.payload["response"] = "Unsupported language"
+                # Don't change the preference for invalid input
+                return env.final()
+            await memory.set("user_preferences", prefs)
             return env.final()
 
         # Unknown action - return error
@@ -220,24 +241,55 @@ class LangAgent(BaseAgent):
         text = env.payload.get("text", "")
         await self.log(env.conversation_id, f"Processing text: {text}")
         memory = await self.get_memory(env.conversation_id)
-        lang = 'en'
-        messages = await memory.get_messages(limit=6)
-        for message in messages:
-            await self.log(env.conversation_id, f"Message: {message}")
-            if message.get("role") == "user":
-                text = message.get("content", "")
-                if util._contains_cyrillic(text):
-                    await self.log(env.conversation_id, f"Detected Cyrillic in message: {text}")
-                    lang = 'ru'
-                    break
-                elif util._contains_chinese(text):
-                    await self.log(env.conversation_id, f"Detected Chinese in message: {text}")
-                    lang = 'zh'
-                    break
+        
+        # Check user preferences first
+        prefs = await memory.get("user_preferences", {})
+        preferred_lang = prefs.get("language")
+        
+        if preferred_lang is not None:
+            # User has explicitly set a language preference
+            lang = preferred_lang
+            confidence = 1.0
+            await self.log(env.conversation_id, f"Using user preferred language: {lang}")
+        else:
+            # Auto-detect language from conversation history
+            lang = 'en'
+            confidence = 0.9
+            messages = await memory.get_messages(limit=6)
+            
+            # Collect all user messages for analysis
+            user_texts = []
+            for message in messages:
+                await self.log(env.conversation_id, f"Message: {message}")
+                if message.get("role") == "user":
+                    user_texts.append(message.get("content", ""))
+            
+            # Add current message to analysis
+            current_text = env.payload.get("text", "")
+            if current_text:
+                user_texts.append(current_text)
+            
+            # Analyze combined text for language detection
+            combined_text = " ".join(user_texts)
+            await self.log(env.conversation_id, f"Analyzing combined text ({len(combined_text)} chars): {combined_text[:100]}...")
+            
+            if util._is_cyrillic_text(combined_text):
+                lang = 'ru'
+                confidence = 0.95
+                await self.log(env.conversation_id, f"Detected Russian: sufficient Cyrillic content in {len(combined_text)} characters")
+            elif util._is_chinese_text(combined_text):
+                lang = 'zh'
+                confidence = 0.95
+                await self.log(env.conversation_id, f"Detected Chinese: sufficient Chinese content in {len(combined_text)} characters")
+            else:
+                await self.log(env.conversation_id, f"Defaulting to English: insufficient non-Latin content in {len(combined_text)} characters")
+            
+            await self.log(env.conversation_id, f"Auto-detected language: {lang}")
+        
         await memory.set("language", lang)
         env.payload["language"] = lang
-        env.payload["confidence"] = 0.9  # TODO: Real confidence calculation
-        await self.log(env.conversation_id, f"Detected language: {lang}")
+        env.payload["confidence"] = confidence
+        await self.log(env.conversation_id, f"Final language: {lang} (confidence: {confidence})")
  
         return env
 
@@ -766,6 +818,23 @@ async def clear_all_conversation_data(user_id: str) -> bool:
             
     except Exception as e:
         logger.error(f"Error clearing all conversation data for user {user_id}: {e}")
+        return False
+
+async def set_user_language(user_id: str, language: str | None) -> bool:
+    try:
+        if language is None or language in config.SUPPORTED_LANGUAGES:
+            #language = None means reset to default language
+            result = await process_request("command", user_id, {"action": "set_language", "language": language})
+            # process_request returns a string, check if it indicates success
+            success = "successfully" in result.lower() or "reset" in result.lower()
+            if success:
+                logger.info(f"Language set for user {user_id}: {result}")
+            return success
+        else:
+            logger.error(f"Unsupported language: {language} for user {user_id}")
+            return False
+    except Exception as e:
+        logger.error(f"Error setting user language for user {user_id}: {e}")
         return False
 
 if __name__ == "__main__":

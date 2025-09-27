@@ -144,7 +144,7 @@ class PreferencesAgent(BaseAgent):
         
         # Initialize default preferences
         default_prefs = {
-            "language": "auto",
+            "language": None,
             "response_style": "detailed",
             "notifications": True,
             "timezone": "UTC"

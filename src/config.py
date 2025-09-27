@@ -160,6 +160,22 @@ STREAM_CLEANUP_INTERVAL_SEC = int(os.getenv("STREAM_CLEANUP_INTERVAL_SEC", "30")
 
 AGENT_SELF_LOOP_DISABLED = os.getenv("AGENT_SELF_LOOP_DISABLED", "true").lower() in ["true", "1", "yes", "y"]
 
+SUPPORTED_LANGUAGES = {
+    "en": "English",
+    "ru": "Русский",
+    "de": "Deutsch",
+    "fr": "Français",
+    "es": "Español",
+    "zh": "中文",
+    "ja": "日本語"
+}
+
+# Language detection thresholds
+LANG_DETECTION_MIN_LENGTH_CYRILLIC = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CYRILLIC", "15"))  # Increased from 10
+LANG_DETECTION_MIN_LENGTH_CHINESE = int(os.getenv("LANG_DETECTION_MIN_LENGTH_CHINESE", "8"))     # Increased from 6
+LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CYRILLIC", "0.5"))  # Increased from 0.3
+LANG_DETECTION_MIN_PERCENTAGE_CHINESE = float(os.getenv("LANG_DETECTION_MIN_PERCENTAGE_CHINESE", "0.4"))    # Increased from 0.3
+
 logger.info("Configuration loaded.")
 
 # --- Rate limiting and metrics ---

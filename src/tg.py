@@ -126,21 +126,68 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("reboot", self.stop_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("clear", self.clear_command))
+        self.application.add_handler(CommandHandler("lang", self.set_language_command))
 
         # Message handler for all text messages
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-    async def clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Clear conversation history for the user."""
+    async def _check_user_authorization(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Check if user is authorized to use the bot.
+        
+        Returns:
+            bool: True if authorized, False if not (and sends unauthorized message)
+        """
         user_id = str(update.effective_user.id)
-        logger.info(f"Clear command received from user {user_id}")
         
         if user_id not in telegram_users:
             await self._retry_with_backoff(
                 context.bot.send_message,
                 chat_id=update.effective_chat.id, 
                 text="You are not authorized to use this bot. Please contact the administrator."
-            ) 
+            )
+            return False
+        
+        return True
+
+    async def set_language_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set user language."""
+        user_id = str(update.effective_user.id)
+        logger.info(f"Set language command received from user {user_id}")
+
+        if not await self._check_user_authorization(update, context):
+            return
+        
+        # Safe command parsing
+        parts = update.effective_message.text.split()
+        language = parts[1] if len(parts) > 1 else None
+        
+        # Validate language code format (2-3 chars, lowercase)
+        if language is not None and (len(language) < 2 or len(language) > 3 or not language.islower()):
+            await self._retry_with_backoff(
+                update.message.reply_text,
+                f"❌ Invalid language code format. Use: {', '.join(config.SUPPORTED_LANGUAGES.keys())}"
+            )
+            return
+
+        result = await assistant.set_user_language(user_id, language)
+
+        if result:
+            await self._retry_with_backoff(
+                update.message.reply_text,
+                f"✅ Language set successfully to {'autodetect' if language is None else config.SUPPORTED_LANGUAGES[language]}."
+            )
+        else:
+            await self._retry_with_backoff(
+                update.message.reply_text,
+                "❌ Failed to set language."
+            )
+
+    async def clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Clear conversation history for the user."""
+        user_id = str(update.effective_user.id)
+        logger.info(f"Clear command received from user {user_id}")
+        
+        if not await self._check_user_authorization(update, context):
             return
         
         # Clear conversation history for this user
@@ -162,12 +209,7 @@ class TelegramBot:
         user_id = str(update.effective_user.id)
         logger.info(f"Stop command received from user {user_id}")
         
-        if user_id not in telegram_users:
-            await self._retry_with_backoff(
-                context.bot.send_message,
-                chat_id=update.effective_chat.id, 
-                text="You are not authorized to use this bot. Please contact the administrator."
-            ) 
+        if not await self._check_user_authorization(update, context):
             return
         
         await self._retry_with_backoff(
@@ -228,6 +270,9 @@ class TelegramBot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
+        if not await self._check_user_authorization(update, context):
+            return
+            
         help_message = (
             f"🤖 Alaris SMS Platform Assistant v{config.VERSION} Help\n\n"
             "I can answer questions about:\n"
@@ -255,12 +300,7 @@ class TelegramBot:
             
             logger.info(f"Received message from user {user_id}: {message_text}")
 
-            if user_id not in telegram_users:
-                await self._retry_with_backoff(
-                    context.bot.send_message,
-                    chat_id=update.effective_chat.id, 
-                    text="You are not authorized to use this bot. Please contact the administrator."
-                ) 
+            if not await self._check_user_authorization(update, context):
                 return
             
             # Send immediate "Thinking..." response with retry logic
@@ -312,12 +352,14 @@ class TelegramBot:
             # Telegram message limit is 4096 characters
             MAX_MESSAGE_LENGTH = 4000  # Leave some buffer for HTML tags
             
+            # Escape HTML characters to prevent parsing errors
+            escaped_message = html.escape(message)
 
-            if len(message) <= MAX_MESSAGE_LENGTH:
+            if len(escaped_message) <= MAX_MESSAGE_LENGTH:
                 # Message fits in one piece
                 await self._retry_with_backoff(
                     thinking_message.edit_text,
-                    message,
+                    escaped_message,
                     parse_mode='HTML'
                 )
                 message_sent = True
@@ -330,7 +372,7 @@ class TelegramBot:
                 current_chunk = ""
                 
                 # Split by paragraphs first
-                paragraphs = message.split('\n\n')
+                paragraphs = escaped_message.split('\n\n')
                 
                 for paragraph in paragraphs:
                     if len(current_chunk + paragraph + '\n\n') <= MAX_MESSAGE_LENGTH:
