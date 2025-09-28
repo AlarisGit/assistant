@@ -182,6 +182,11 @@ class ManagerAgent(BaseAgent):
             return env
 
         if stage == "translation":
+            env.target_role = "essence"
+            env.payload["stage"] = "essence" #can be overriden by manager if clarification needed
+            return env
+        
+        if stage == "essence":
             env.target_role = "response"
             env.payload["stage"] = "response" #can be overriden by manager if clarification needed
             return env
@@ -353,24 +358,58 @@ class EssenceAgent(BaseAgent):
         
         await self.log(env.conversation_id, f"Essence extraction: text='{text[:50]}...' text_eng='{text_eng[:50]}...'")
         
-        # Get conversation history for context resolution
         memory = await self.get_memory(env.conversation_id)
-        recent_messages = await memory.get_messages(limit=5)
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=True, show_timestamps=True)
+        text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         
-        # TODO: Implement actual essence extraction logic with uncertainty detection
-        # For now, use simple logic with basic uncertainty check
-        if len(text_eng.strip()) < 3:
-            # Request clarification for very short queries
-            env.payload["needs_clarification"] = True
-            env.payload["clarification_reason"] = "insufficient_context"
-            env.payload["clarification_message"] = "The query is too short to understand the context"
-            await self.log(env.conversation_id, "Requesting clarification: query too short")
-        else:
-            env.payload["canonical_question"] = text_eng.strip()
-            env.payload["context_type"] = "new_topic"  # TODO: Detect follow-up vs new topic
-            env.payload["related_history"] = [msg.get("content", "") for msg in recent_messages[-2:]]
-            await self.log(env.conversation_id, f"Extracted canonical question: '{env.payload['canonical_question']}'")
+        # EssenceAgent works in English as system language - no user language needed
+        current_time = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
+        prompt_options = {
+            'current_time': current_time
+        }
+        await self.log(env.conversation_id, f"Requesting essence extraction for: '{text[:100]}...' at {current_time}")
+        response_json = llm.generate_text('essence', text, history, prompt_options=prompt_options)
         
+        await self.log(env.conversation_id, f"LLM response: {response_json}")
+        
+        try:
+            if response_json and response_json.strip():
+                # Clean up response - sometimes LLM adds extra text around JSON
+                json_start = response_json.find('{')
+                json_end = response_json.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    clean_json = response_json[json_start:json_end]
+                    response_dict = json.loads(clean_json)
+                    
+                    if 'canonical_question' in response_dict:
+                        canonical_q = response_dict['canonical_question']
+                        env.payload['canonical_question'] = canonical_q
+                        await self.log(env.conversation_id, f"Extracted canonical question: '{canonical_q}'")
+                    elif 'clarification_reason' in response_dict:
+                        reason = response_dict['clarification_reason']
+                        message = response_dict.get('clarification_message', "Please provide more details to help me understand your question.")
+                        env.payload['needs_clarification'] = True
+                        env.payload['clarification_reason'] = reason
+                        env.payload['clarification_message'] = message
+                        await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
+                    else:
+                        await self.log(env.conversation_id, "Error: LLM response missing required fields")
+                        env.payload['needs_clarification'] = True
+                        env.payload['clarification_reason'] = 'processing_error'
+                        env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
+                else:
+                    raise json.JSONDecodeError("No valid JSON found", response_json, 0)
+            else:
+                await self.log(env.conversation_id, "Error: Empty response from LLM")
+                env.payload['needs_clarification'] = True
+                env.payload['clarification_reason'] = 'processing_error'
+                env.payload['clarification_message'] = "I had trouble processing your request. Could you please try again?"
+                
+        except json.JSONDecodeError as e:
+            await self.log(env.conversation_id, f"JSON parsing error: {e}")
+            env.payload['needs_clarification'] = True
+            env.payload['clarification_reason'] = 'processing_error'
+            env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
         return env
 
 

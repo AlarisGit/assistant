@@ -625,12 +625,13 @@ class ConversationMemory:
         """Get the number of messages in conversation history."""
         return await self.list_length("messages")
     
-    async def get_history(self, limit: Optional[int] = None, normalized: bool = False) -> List[Tuple[str, str]]:
+    async def get_history(self, limit: Optional[int] = None, normalized: bool = False, show_timestamps: bool = False) -> List[Tuple[str, str]]:
         """Get conversation history as user-assistant pairs.
         
         Args:
             limit: Maximum number of messages to process (default: all)
             normalized: If True, use normalized English text for user messages when available
+            show_timestamps: If True, prepend each message with timestamp in format [YYYYMMDD HHMMSS]
             
         Returns:
             List of (user_content, assistant_content) tuples
@@ -641,6 +642,9 @@ class ConversationMemory:
             
             # Get normalized English history for LLM consumption
             normalized_history = await memory.get_history(limit=10, normalized=True)
+            
+            # Get history with timestamps for temporal context
+            timestamped_history = await memory.get_history(limit=10, show_timestamps=True)
             
             for user_msg, assistant_msg in history:
                 print(f"User: {user_msg}")
@@ -661,6 +665,14 @@ class ConversationMemory:
                     normalized_content = metadata.get("content_norm")
                     if normalized_content:
                         content = normalized_content
+                
+                # Add timestamp prefix if requested
+                if show_timestamps:
+                    timestamp = message.get("timestamp", time.time())
+                    # Convert to datetime and format as YYYY.MM.DD HH:MM:SS
+                    dt = datetime.fromtimestamp(timestamp)
+                    timestamp_str = dt.strftime("%Y.%m.%d %H:%M:%S")
+                    content = f"[{timestamp_str}] {content}"
                 
                 pair[role] = content
                 
