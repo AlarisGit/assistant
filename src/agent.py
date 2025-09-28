@@ -618,17 +618,23 @@ class ConversationMemory:
         """Get the number of messages in conversation history."""
         return await self.list_length("messages")
     
-    async def get_history(self, limit: Optional[int] = None) -> List[Tuple[str, str]]:
+    async def get_history(self, limit: Optional[int] = None, normalized: bool = False) -> List[Tuple[str, str]]:
         """Get conversation history as user-assistant pairs.
         
         Args:
             limit: Maximum number of messages to process (default: all)
+            normalized: If True, use normalized English text for user messages when available
             
         Returns:
             List of (user_content, assistant_content) tuples
             
         Example:
+            # Get raw conversation history
             history = await memory.get_history(limit=10)
+            
+            # Get normalized English history for LLM consumption
+            normalized_history = await memory.get_history(limit=10, normalized=True)
+            
             for user_msg, assistant_msg in history:
                 print(f"User: {user_msg}")
                 print(f"Assistant: {assistant_msg}")
@@ -642,6 +648,13 @@ class ConversationMemory:
             content = message.get("content", "")
             
             if role in ["user", "assistant"]:
+                # For user messages, use normalized content if requested and available
+                if role == "user" and normalized:
+                    metadata = message.get("metadata", {})
+                    normalized_content = metadata.get("content_norm")
+                    if normalized_content:
+                        content = normalized_content
+                
                 pair[role] = content
                 
                 # When we have both user and assistant messages, add to history
@@ -650,6 +663,29 @@ class ConversationMemory:
                     pair = {}
         
         return history
+    
+    async def update_last_user_message_normalized(self, normalized_content: str, norm_info: Dict[str, Any]) -> None:
+        """Update the latest user message with normalized content and metadata.
+        
+        Args:
+            normalized_content: The normalized/translated English text
+            norm_info: Normalization metadata (type, source_lang, confidence, model, ts)
+        """
+        messages = await self.get_list("messages")
+        
+        # Find the latest user message (search backwards)
+        for i in range(len(messages) - 1, -1, -1):
+            message = messages[i]
+            if message.get("role") == "user":
+                # Update the message metadata
+                if "metadata" not in message:
+                    message["metadata"] = {}
+                message["metadata"]["content_norm"] = normalized_content
+                message["metadata"]["norm"] = norm_info
+                
+                # Save the updated messages list
+                await self.set("messages", messages)
+                break
     
     # Utility methods
     

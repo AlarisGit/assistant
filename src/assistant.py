@@ -172,7 +172,7 @@ class ManagerAgent(BaseAgent):
             return env
 
         if stage == "translation":
-            env.target_role = "samplellm"
+            env.target_role = "response"
             env.payload["stage"] = "response"
             return env
         
@@ -196,27 +196,6 @@ class ManagerAgent(BaseAgent):
             "message": f"Unknown stage '{stage}'",
         })
         return env.final()
-
-class SampleAgent(BaseAgent):
-    """Sample agent for testing purposes."""
-    
-    async def process(self, env: Envelope) -> Envelope:
-        await self.log(env.conversation_id, f"Processing text: {env.payload.get("text", "")}")
-        env.payload["text"] = f"Sample agent processed: {env.payload.get("text", "")}"
-        return env
-
-class SampleLLMAgent(BaseAgent):
-    """Sample agent for testing purposes."""
-    async def process(self, env: Envelope) -> Envelope:
-        await self.log(env.conversation_id, f"Processing text: {env.payload.get("text", "")}")
-        memory = await self.get_memory(env.conversation_id)
-        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT)
-        # Get language from payload (set by LangAgent) or default to 'en'
-        language = env.payload.get("language", "en")
-        prompt_options = {'language': config.SUPPORTED_LANGUAGES.get(language, "English")}
-        env.payload["response"] = llm.generate_text('sample', env.payload.get("text", ""), history, prompt_options=prompt_options)
-        return env
-
 
 class LangAgent(BaseAgent):
     """Language detection agent using conversation history.
@@ -313,10 +292,28 @@ class TranslationAgent(BaseAgent):
         text = env.payload.get("text", "")
         language = env.payload.get("language", "en")
         await self.log(env.conversation_id, f"Translation/normalization: text='{text[:50]}...' language={language}")
+        
         memory = await self.get_memory(env.conversation_id)
-        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT)
+        # Use raw history for translation to avoid circular dependency and preserve original context
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=False)
         prompt_options = {'language': config.SUPPORTED_LANGUAGES.get(language, "English")}
-        env.payload["text_eng"] = llm.generate_text('translate', env.payload.get("text", ""), history, prompt_options=prompt_options)
+        
+        # Generate normalized English text
+        normalized_text = llm.generate_text('translate', text, history, prompt_options=prompt_options)
+        env.payload["text_eng"] = normalized_text
+        
+        # Store normalized content in the latest user message metadata
+        norm_info = {
+            "type": "translation" if language != "en" else "correction",
+            "source_lang": language,
+            "confidence": 0.95,  # TODO: Get actual confidence from LLM
+            "model": "llm",  # TODO: Get actual model info
+            "ts": time.time()
+        }
+        
+        await memory.update_last_user_message_normalized(normalized_text, norm_info)
+        await self.log(env.conversation_id, f"Stored normalized text: '{normalized_text[:50]}...' (type: {norm_info['type']})")
+        
         return env
 
 
@@ -613,22 +610,25 @@ class ResponseAgent(BaseAgent):
         Writes: response, sources_used, generation_confidence, generation_error (if any)
         + Universal clarification attributes (when documentation insufficient)
         """
+        memory = await self.get_memory(env.conversation_id)
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=True)
+        # Get language from payload (set by LangAgent) or default to 'en'
+        language = config.SUPPORTED_LANGUAGES.get(env.payload.get("language", "en"), "English")
+        text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
+        prompt_options = {'language': language}
+        await self.log(env.conversation_id, f"Preparing response in {language} for text: {text}")
+        env.payload["response"] = llm.generate_text('sample', text, history, prompt_options=prompt_options)
+
+        return env
+
+        #keep this code for reference       
         # Extract input attributes
         augmented_prompt = env.payload.get("augmented_prompt", "")
-        language = env.payload.get("language", "en")
+        language = env.payload.get("language", "English")
         canonical_question = env.payload.get("canonical_question", "")
         
         await self.log(env.conversation_id, f"Response generation: prompt_length={len(augmented_prompt)} language={language}")
         
-        # Get conversation history for context
-        memory = await self.get_memory(env.conversation_id)
-        history = []
-        for message in await memory.get_messages(limit=10):
-            if message.get("role") in ["user", "assistant"]:
-                history.append((message.get("role"), message.get("content", "")))
-        
-        # TODO: Implement actual LLM response generation with uncertainty detection
-        # For now, create placeholder response with basic uncertainty check
         if len(augmented_prompt.strip()) < 50:
             # Request clarification when documentation context is insufficient
             env.payload["needs_clarification"] = True
@@ -727,10 +727,6 @@ _response1 = ResponseAgent()      # 2 instances - flagship LLM generation
 _response2 = ResponseAgent()
 _quality1 = QualityAgent()        # 2 instances - LLM validation
 _quality2 = QualityAgent()
-
-# Keep sample agents for testing
-_samplellm1 = SampleLLMAgent()
-_samplellm2 = SampleLLMAgent()
 
 # Direct function implementations (no proxy class needed)
 
