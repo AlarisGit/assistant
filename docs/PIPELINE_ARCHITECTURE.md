@@ -4,6 +4,39 @@
 
 This document defines the comprehensive agent architecture for the industry-agnostic RAG-based documentation assistant. The system uses a dynamic flow with intelligent routing decisions powered by LLM analysis rather than rigid pattern matching.
 
+## Current Implementation Status (v2.3)
+
+### ✅ **Implemented Agents**
+- **ManagerAgent**: Dynamic pipeline orchestrator with intelligent routing
+- **LangAgent**: Language detection using conversation history patterns  
+- **TranslationAgent**: Mandatory translation and text normalization
+- **EssenceAgent**: Context-aware canonical question extraction with temporal context
+- **ResponseAgent**: LLM-powered response generation
+- **ClarificationAgent**: Polite, localized clarification message composition
+
+### 🚧 **Planned Agents** (Future RAG Enhancement)
+- **GuardrailsAgent**: Documentation scope enforcement
+- **SearchAgent**: Multi-level RAG search across documentation
+- **AugmentationAgent**: Enhanced LLM prompt crafting with search context
+- **QualityAgent**: Response validation with pipeline retry capability
+
+### 🎯 **Recent Major Improvements**
+1. **Enhanced Temporal Context** (v2.3):
+   - Timestamped conversation history with format `[YYYY.MM.DD HH:MM:SS]`
+   - Current time awareness for LLM temporal understanding
+   - Conversation evolution tracking across clarifications
+
+2. **Context-Aware Canonical Questions** (v2.3):
+   - **RAG-ready questions** that include domain/topic context from conversation
+   - **Self-contained queries** that work without conversation history
+   - **Perspective preservation** - never flips user intent direction
+   - **Critical for RAG success**: Transforms generic questions into searchable, contextual queries
+
+3. **Universal Clarification System** (v2.2):
+   - Any agent can request clarification when uncertain
+   - Prevents hallucinations and pipeline failures
+   - Consistent user experience across all uncertainty scenarios
+
 ## Core Principles
 
 1. **Industry-Agnostic**: Based on universal data structure patterns, not domain-specific knowledge
@@ -174,27 +207,49 @@ This ensures:
 - **English**: Spell-check, grammar-check, and normalize text
 - **Always produces**: Clean `text_eng` for downstream agents
 
-### 4. EssenceAgent
+### 4. EssenceAgent ✅ **IMPLEMENTED**
 **Role**: `essence`  
-**Purpose**: Extract canonical question from conversation history  
+**Purpose**: Extract canonical question from conversation history with temporal context  
 **Instances**: 2 (LLM context extraction)
 
 **Responsibilities**:
-- Extract canonical question from conversation flow
-- Resolve pronouns and references ("it", "that feature", etc.)
-- Combine related questions from conversation history
-- Detect follow-up questions vs new topics
-- Clean and normalize queries for search
+- **Extract context-aware canonical questions** that include domain/topic context for RAG compatibility
+- **Resolve pronouns and references** ("it", "that feature", etc.) using conversation history
+- **Combine related questions** from conversation history into self-contained queries
+- **Preserve user's perspective** and intent direction (never flip question direction)
+- **Create RAG-ready questions** that are understandable without conversation history
+- **Detect follow-up questions** vs new topics with temporal awareness
+- **Clean and normalize queries** for optimal search performance
+
+**Enhanced Temporal Context Features**:
+- **Timestamped conversation history**: Receives conversation history with timestamps in format `[YYYY.MM.DD HH:MM:SS]`
+- **Current time awareness**: Gets current time context for temporal understanding
+- **Conversation evolution tracking**: Can track how user intent changes over time
+- **Context preservation**: Maintains conversation flow understanding across clarifications
 
 **Envelope Attributes**:
 - **Reads**:
   - `text` - Original user input
   - `text_eng` - Clean English version from TranslationAgent
-  - Conversation history from distributed memory (for context resolution)
+  - Timestamped conversation history from distributed memory (with `show_timestamps=True`)
+  - Current time context for temporal awareness
 - **Writes**:
-  - `canonical_question` - Cleaned, normalized, and context-resolved query
+  - `canonical_question` - **Context-aware**, self-contained query ready for RAG search
   - `context_type` - Type of context: "new_topic", "follow_up", "clarification"
   - `related_history` - Relevant previous messages that provide context
+  - **Universal clarification attributes** (when query too ambiguous):
+    - `needs_clarification` - Set to `true` when user intent unclear
+    - `clarification_reason` - Set to `"ambiguous_query"`, `"missing_context"`, `"vague_request"`, etc.
+    - `clarification_message` - Basic message explaining what clarification is needed
+
+**Critical RAG Enhancement**:
+- **BEFORE**: "Why are two stages needed?" (generic, RAG search fails)
+- **AFTER**: "Why are two stages needed in rocket launches and space missions?" (context-aware, RAG-ready)
+
+**Example Context-Aware Transformations**:
+- "What do you know about X?" → "What information is available about X?"
+- "How does it work?" → "How does OAuth authentication work?" (using conversation context)
+- "Why are two stages needed?" → "Why are two stages needed in rocket launches?" (domain context included)
 
 ### 5. GuardrailsAgent
 **Role**: `guardrails`  
@@ -390,18 +445,18 @@ This table provides a complete overview of which **payload attributes** each age
 - `clarification_reason` - Reason code for clarification request
 - `clarification_message` - Agent-specific message explaining what's needed
 
-| Agent | Reads | Writes |
-|-------|-------|--------|
-| **ManagerAgent** | `stage`, `language`, `within_scope`, `search_quality`, `needs_clarification`, `clarification_reason`, `clarification_message`, `clarification_result`, `quality_decision` | `stage`, `response` (for final/rejection messages) + **`target_role`** (system attribute) |
-| **LangAgent** | `text` (user query), conversation history from memory | `language`, `confidence` |
-| **TranslationAgent** | `text`, `language` | `text_eng`, `translation_confidence`, `corrections_made` |
-| **EssenceAgent** | `text`, `text_eng`, conversation history from memory | `canonical_question`, `context_type`, `related_history` |
-| **GuardrailsAgent** | `canonical_question`, `domain_scope` (from config) | `within_scope`, `guardrails_confidence`, `guardrails_analysis` + **universal clarification attributes** (when out-of-scope) |
-| **SearchAgent** | `canonical_question`, `text_eng` | `search_results`, `search_context`, `search_stats`, `search_quality`, `search_error` (if any) |
-| **ClarificationAgent** | `needs_clarification`, `clarification_reason`, `clarification_message`, `language`, `stage`, conversation history from memory | `response`, `clarification_type`, `suggested_actions` |
-| **AugmentationAgent** | `search_results`, `search_context`, `canonical_question`, `language`, `text` | `augmented_prompt`, `source_references`, `context_structure` |
-| **ResponseAgent** | `augmented_prompt`, `language`, `canonical_question`, conversation history from memory | `response`, `sources_used`, `generation_confidence`, `generation_error` (if any) + **universal clarification attributes** (when documentation insufficient) |
-| **QualityAgent** | `response`, `search_context`, `canonical_question`, `source_references` | `quality_score`, `quality_decision`, `quality_analysis`, `validation_result` + **universal clarification attributes** (when insufficient user details) |
+| Agent | Status | Reads | Writes |
+|-------|--------|-------|--------|
+| **ManagerAgent** | ✅ **Implemented** | `stage`, `language`, `needs_clarification`, `clarification_reason`, `clarification_message`, `response` | `stage`, `response` (for final/rejection messages) + **`target_role`** (system attribute) |
+| **LangAgent** | ✅ **Implemented** | `text` (user query), conversation history from memory | `language`, `confidence` |
+| **TranslationAgent** | ✅ **Implemented** | `text`, `language` | `text_eng`, `translation_confidence`, `corrections_made` |
+| **EssenceAgent** | ✅ **Implemented** | `text`, `text_eng`, timestamped conversation history from memory, current time context | `canonical_question` (context-aware), `context_type`, `related_history` + **universal clarification attributes** (when ambiguous) |
+| **ResponseAgent** | ✅ **Implemented** | `canonical_question`, `language`, conversation history from memory | `response`, `generation_confidence`, `generation_error` (if any) + **universal clarification attributes** (when insufficient context) |
+| **ClarificationAgent** | ✅ **Implemented** | `needs_clarification`, `clarification_reason`, `clarification_message`, `language`, `stage`, conversation history from memory | `response`, `clarification_type`, `suggested_actions` |
+| **GuardrailsAgent** | 🚧 **Planned** | `canonical_question`, `domain_scope` (from config) | `within_scope`, `guardrails_confidence`, `guardrails_analysis` + **universal clarification attributes** (when out-of-scope) |
+| **SearchAgent** | 🚧 **Planned** | `canonical_question`, `text_eng` | `search_results`, `search_context`, `search_stats`, `search_quality`, `search_error` (if any) |
+| **AugmentationAgent** | 🚧 **Planned** | `search_results`, `search_context`, `canonical_question`, `language`, `text` | `augmented_prompt`, `source_references`, `context_structure` |
+| **QualityAgent** | 🚧 **Planned** | `response`, `search_context`, `canonical_question`, `source_references` | `quality_score`, `quality_decision`, `quality_analysis`, `validation_result` + **universal clarification attributes** (when insufficient user details) |
 
 ### Envelope Structure and Attribute Separation
 
@@ -461,6 +516,48 @@ guardrails_routing → search_quality → needs_clarification → quality_decisi
 ```
 
 ## Pipeline Flow Diagram
+
+### Current Implementation (v2.3)
+**✅ Currently Implemented Pipeline** (manager → lang → translation → essence → response):
+
+```mermaid
+graph TD
+    A[User Query] --> B[ManagerAgent<br/>Stage: start]
+    B --> C[LangAgent<br/>Detect Language]
+    C --> D[ManagerAgent<br/>Stage: lang]
+    D --> E[TranslationAgent<br/>Normalize & Correct]
+    E --> F[ManagerAgent<br/>Stage: translation]
+    F --> G[EssenceAgent<br/>Extract Context-Aware Question]
+    G --> H[ManagerAgent<br/>Stage: essence]
+    H --> I[ResponseAgent<br/>Generate Response]
+    I --> J[ManagerAgent<br/>Stage: response]
+    J --> K[ManagerAgent<br/>Stage: final]
+    K --> L[Final Response to User]
+    
+    G --> M{Needs<br/>Clarification?}
+    M -->|Yes| N[ManagerAgent<br/>Route to Clarification]
+    N --> O[ClarificationAgent<br/>Compose Message]
+    O --> P[User Clarification]
+    P --> B
+    
+    style A fill:#e1f5fe
+    style L fill:#e8f5e8
+    style O fill:#fff3e0
+    style B fill:#f3e5f5
+    style D fill:#f3e5f5
+    style F fill:#f3e5f5
+    style H fill:#f3e5f5
+    style J fill:#f3e5f5
+    style K fill:#f3e5f5
+    style N fill:#f3e5f5
+    style G fill:#c8e6c9
+    style C fill:#c8e6c9
+    style E fill:#c8e6c9
+    style I fill:#c8e6c9
+```
+
+### Future Complete Pipeline (Planned)
+**🚧 Future RAG-Enhanced Pipeline** (with search, guardrails, quality control):
 
 ```mermaid
 graph TD
@@ -523,17 +620,47 @@ graph TD
 ### Pipeline Decision Points
 
 **🔄 Universal Clarification Triggers:**
-- **EssenceAgent**: Query too short or ambiguous
-- **GuardrailsAgent**: Out of documentation scope
-- **SearchAgent**: Poor search results quality
-- **ResponseAgent**: Insufficient documentation context
-- **QualityAgent**: Poor response due to insufficient user details
+- **EssenceAgent**: Query too short, ambiguous, or lacks context ✅ **Implemented**
+- **ResponseAgent**: Insufficient context for accurate response ✅ **Implemented**
+- **ClarificationAgent**: Composes user-friendly clarification messages ✅ **Implemented**
+- **GuardrailsAgent**: Out of documentation scope 🚧 **Planned**
+- **SearchAgent**: Poor search results quality 🚧 **Planned**
+- **QualityAgent**: Poor response due to insufficient user details 🚧 **Planned**
 
 **🎯 ManagerAgent Routing Logic:**
-- Detects `needs_clarification = true` from any agent
-- Routes to ClarificationAgent for user-friendly message composition
-- Handles pipeline retries for quality issues
-- Orchestrates entire conversation flow
+- Detects `needs_clarification = true` from any agent ✅ **Implemented**
+- Routes to ClarificationAgent for user-friendly message composition ✅ **Implemented**
+- Handles pipeline retries for quality issues 🚧 **Planned**
+- Orchestrates entire conversation flow ✅ **Implemented**
+
+## Key Achievements (v2.3)
+
+### 🎯 **Context-Aware RAG Compatibility**
+**Problem Solved**: Generic canonical questions break RAG search
+- **Before**: "Why are two stages needed?" → RAG search fails (no context)
+- **After**: "Why are two stages needed in rocket launches and space missions?" → RAG finds relevant documents
+
+**Impact**: This breakthrough ensures RAG components can find relevant documents without needing full conversation history, making the system truly scalable and effective.
+
+### ⏰ **Enhanced Temporal Context**
+**Innovation**: First agentic system with comprehensive temporal awareness
+- **Timestamped conversation history**: `[2025.09.28 21:52:32] User message content`
+- **Current time context**: LLM knows current time vs message timestamps
+- **Conversation evolution tracking**: Understands how intent changes over time
+
+**Benefits**: Better context resolution, improved clarification decisions, temporal pattern recognition.
+
+### 🔄 **Universal Clarification System**
+**Design Excellence**: Any agent can request clarification when uncertain
+- **Prevents hallucinations**: Agents ask for clarification instead of guessing
+- **Consistent UX**: All uncertainty handled uniformly by ClarificationAgent
+- **Graceful degradation**: Pipeline never breaks on ambiguous inputs
+
+### 🎛️ **Centralized Routing Authority**
+**Architectural Principle**: Only ManagerAgent controls message flow
+- **Simplified agent logic**: Agents focus on processing, not routing
+- **Predictable flow**: Single point of control for all routing decisions
+- **Clean separation**: Processing vs orchestration concerns separated
 
 ### Attribute Naming Conventions
 
