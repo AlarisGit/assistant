@@ -165,7 +165,17 @@ class ManagerAgent(BaseAgent):
             env.target_role = "lang"
             env.payload["stage"] = "lang"
             return env
+
+#        if stage == "translation": #Temporary block for clarification testing
+#            env.payload["needs_clarification"] = True
+#            env.payload["clarification_reason"] = "not_enough_info"
+#            env.payload["clarification_message"] = "I need more information to translate this text. Please provide more details."
         
+        if 'needs_clarification' in env.payload and env.payload['needs_clarification']:
+            env.target_role = "clarification"
+            env.payload["stage"] = "clarification"
+            return env
+
         if stage == "lang":
             env.target_role = "translation"
             env.payload["stage"] = "translation"
@@ -173,10 +183,10 @@ class ManagerAgent(BaseAgent):
 
         if stage == "translation":
             env.target_role = "response"
-            env.payload["stage"] = "response"
+            env.payload["stage"] = "response" #can be overriden by manager if clarification needed
             return env
         
-        if stage == "response":
+        if stage in ["response", "clarification"]:
             env.target_role = "manager"
             env.payload["stage"] = "final"
             return env
@@ -495,37 +505,39 @@ class ClarificationAgent(BaseAgent):
         needs_clarification = env.payload.get("needs_clarification", False)
         clarification_reason = env.payload.get("clarification_reason", "")
         clarification_message = env.payload.get("clarification_message", "")
-        language = env.payload.get("language", "en")
-        stage = env.payload.get("stage", "")
-        
-        await self.log(env.conversation_id, f"Clarification composition: needs={needs_clarification} reason={clarification_reason} language={language}")
-        
+
         if not needs_clarification:
             await self.log(env.conversation_id, "No clarification needed - skipping")
             return env
         
-        # Get conversation history for context
+        # Format clarification reason with additional context if available
+        reason_text = clarification_reason
+        if clarification_message:
+            reason_text += f" ({clarification_message})"
+            
+        await self.log(env.conversation_id, f"Clarification requested: {reason_text}")
+        
         memory = await self.get_memory(env.conversation_id)
-        recent_messages = await memory.get_messages(limit=3)
-        
-        # TODO: Implement actual LLM-powered clarification message composition
-        # For now, create basic clarification response based on reason
-        reason_templates = {
-            "insufficient_context": "I need more context to understand your request better.",
-            "missing_details": "Could you provide more specific details about what you're looking for?",
-            "out_of_scope": "This question appears to be outside our documentation scope. Could you rephrase it to focus on our documented features?",
-            "quality_insufficient": "I couldn't provide a complete answer with the available information. Could you be more specific?",
-            "ambiguous_query": "Your question could be interpreted in multiple ways. Could you clarify what specifically you're asking about?"
-        }
-        
-        base_message = reason_templates.get(clarification_reason, "I need clarification to provide a better response.")
-        
-        # TODO: Translate to user's language if not English
-        env.payload["response"] = f"{base_message} {clarification_message}"
-        env.payload["clarification_type"] = clarification_reason
-        env.payload["suggested_actions"] = ["Provide more details", "Rephrase the question", "Ask about specific features"]
-        
-        await self.log(env.conversation_id, f"Clarification response composed: {len(env.payload['response'])} chars")
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=False)
+        # Get language from payload (set by LangAgent) or default to 'en'
+        language = config.SUPPORTED_LANGUAGES.get(env.payload.get("language", "en"), "English")
+        text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
+        prompt_options = {'language': language}
+        prompt_options['clarification_reason'] = reason_text
+        await self.log(env.conversation_id, f"Preparing clarification request in {language} for text: {text}")
+        env.payload["response"] = llm.generate_text('clarify', text, history, prompt_options=prompt_options)
+
+        #Flush need_clarification flag to avoid loop
+        env.payload["needs_clarification"]= False
+        env.payload["clarification_reason"] = ""
+        env.payload["clarification_message"] = ""
+        #reason_templates = {
+        #    "insufficient_context": "I need more context to understand your request better.",
+        #    "missing_details": "Could you provide more specific details about what you're looking for?",
+        #    "out_of_scope": "This question appears to be outside our documentation scope. Could you rephrase it to focus on our documented features?",
+        #    "quality_insufficient": "I couldn't provide a complete answer with the available information. Could you be more specific?",
+        #    "ambiguous_query": "Your question could be interpreted in multiple ways. Could you clarify what specifically you're asking about?"
+        #}
         
         return env
 
