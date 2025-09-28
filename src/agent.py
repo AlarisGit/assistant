@@ -321,16 +321,23 @@ MAX_ENVELOPE_AGE = 600.0  # 10 minutes
 
 # -------------------------- Utilities (host, pid, counters) --------------------------
 
-_instance_counter = 0
-def get_next_counter() -> int:
-    """Monotonic in-process counter (not persisted)."""
-    global _instance_counter
-    _instance_counter += 1
-    return _instance_counter
+_instance_counter = {}
 
-def build_agent_id() -> str:
-    """AGENT_ID = {HOSTNAME}:{PID}:{COUNTER}."""
-    return f"{get_hostname()}:{get_pid()}:{get_next_counter()}"
+def get_next_counter(key: str|None) -> int:
+    """Monotonic in-process counter (not persisted)."""
+    if key is None:
+        key = "__default__"
+    if key not in _instance_counter:
+        _instance_counter[key] = 0
+    _instance_counter[key] += 1
+    return _instance_counter[key]
+
+def build_agent_id(key: str|None) -> str:
+    """AGENT_ID = {HOSTNAME}:{PID}:{COUNTER}[:{KEY}]."""
+    agent_id = f"{get_hostname()}:{get_pid()}:{get_next_counter(key)}"
+    if key:
+        agent_id += f":{key}"
+    return agent_id
 
 def derive_role_from_class_name(class_name: str) -> str:
     """Derive agent role from class name.
@@ -965,7 +972,7 @@ class BaseAgent:
     ) -> None:
         self.redis = None  # Will be initialized in start()
         self.role = derive_role_from_class_name(self.__class__.__name__)
-        self.agent_id = build_agent_id()
+        self.agent_id = build_agent_id(self.role)
         self.task_timeout_sec = task_timeout_sec
 
         # Streams / groups
@@ -1133,7 +1140,7 @@ class BaseAgent:
             relative_time = f"{relative_ts:.3f}"
             
             # Format log entry with improved alignment
-            log_entry = f"[{absolute_time}] {relative_time:>7} {self.agent_id:<10} {self.role:<10} {message}\n"
+            log_entry = f"[{absolute_time}] {relative_time:>7} {self.agent_id:<30} {message}\n"
             
             # Append to log file
             with open(log_path, 'a', encoding='utf-8') as f:
