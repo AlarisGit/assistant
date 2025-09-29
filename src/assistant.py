@@ -368,7 +368,7 @@ class EssenceAgent(BaseAgent):
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         
         # EssenceAgent works in English as system language - no user language needed
-        current_time = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
+        current_time = util.get_current_time()
         prompt_options = {
             'current_time': current_time
         }
@@ -441,7 +441,7 @@ class GuardrailsAgent(BaseAgent):
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         
         # EssenceAgent works in English as system language - no user language needed
-        current_time = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
+        current_time = util.get_current_time()
         prompt_options = {
             'current_time': current_time
         }
@@ -694,11 +694,11 @@ class ResponseAgent(BaseAgent):
         + Universal clarification attributes (when documentation insufficient)
         """
         memory = await self.get_memory(env.conversation_id)
-        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=True)
+        history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=True, show_timestamps=True)
         # Get language from payload (set by LangAgent) or default to 'en'
         language = config.SUPPORTED_LANGUAGES.get(env.payload.get("language", "en"), "English")
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
-        prompt_options = {'language': language}
+        prompt_options = {'language': language, 'current_time': util.get_current_time()}
         await self.log(env.conversation_id, f"Preparing response in {language} for text: {text}")
         env.payload["response"] = llm.generate_text('sample', text, history, prompt_options=prompt_options)
 

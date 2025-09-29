@@ -5,6 +5,8 @@ import socket
 import config
 import logging
 import re
+import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -109,6 +111,9 @@ def _is_chinese_text(text: str, min_length: int = None, min_percentage: float = 
     
     chinese_ratio = chinese_chars / text_chars
     return chinese_ratio >= min_percentage
+
+def get_current_time():
+    return datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
 
 if __name__ == '__main__':
     print(get_hostname())
