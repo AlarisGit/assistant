@@ -187,6 +187,11 @@ class ManagerAgent(BaseAgent):
             return env
         
         if stage == "essence":
+            env.target_role = "guardrails"
+            env.payload["stage"] = "guardrails" #can be overriden by manager if clarification needed
+            return env
+        
+        if stage == "guardrails":
             env.target_role = "response"
             env.payload["stage"] = "response" #can be overriden by manager if clarification needed
             return env
@@ -430,33 +435,60 @@ class GuardrailsAgent(BaseAgent):
         """Process guardrails analysis request.
         
         Reads: canonical_question, domain_scope (from config)
-        Writes: within_scope, guardrails_confidence, guardrails_analysis
-        + Universal clarification attributes (when out-of-scope)
+        Writes: Universal clarification attributes (when out-of-scope or abuse, injection and other misbehaviors detected)
         """
-        # Extract input attributes
-        canonical_question = env.payload.get("canonical_question", "")
+    
+        text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         
-        await self.log(env.conversation_id, f"Guardrails analysis: question='{canonical_question[:50]}...'")
+        # EssenceAgent works in English as system language - no user language needed
+        current_time = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
+        prompt_options = {
+            'current_time': current_time
+        }
         
-        # TODO: Implement actual LLM-powered guardrails analysis
-        # For now, use simple logic - assume most queries are within scope
-        within_scope = True  # TODO: Real scope analysis
-        
-        env.payload["within_scope"] = within_scope
-        env.payload["guardrails_confidence"] = 0.9
-        env.payload["guardrails_analysis"] = f"Query appears to be within documentation scope: {canonical_question}"
-        
-        if not within_scope:
-            # Use universal clarification system for out-of-scope queries
-            env.payload["needs_clarification"] = True
-            env.payload["clarification_reason"] = "out_of_scope"
-            env.payload["clarification_message"] = "This query appears to be outside the documentation scope"
-            await self.log(env.conversation_id, "Requesting clarification: query out of scope")
-        else:
-            await self.log(env.conversation_id, f"Guardrails passed: within_scope={within_scope} (confidence: {env.payload['guardrails_confidence']})")
-        
-        return env
+        await self.log(env.conversation_id, f"Guardrails analysis: text='{text[:100]}...'")
 
+        response_json = llm.generate_text('guardrails', text, prompt_options=prompt_options)
+        await self.log(env.conversation_id, f"LLM response: {response_json}")
+        
+        try:
+            if response_json and response_json.strip():
+                # Clean up response - sometimes LLM adds extra text around JSON
+                json_start = response_json.find('{')
+                json_end = response_json.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    clean_json = response_json[json_start:json_end]
+                    response_dict = json.loads(clean_json)
+                    
+                    if 'guardrails_passed' in response_dict:
+                        env.payload['guardrails_passed'] = response_dict['guardrails_passed']
+                        await self.log(env.conversation_id, f"Guardrails passed: {response_dict['guardrails_passed']}")
+                    elif 'clarification_reason' in response_dict:
+                        reason = response_dict['clarification_reason']
+                        message = response_dict.get('clarification_message', "Internal error: incomplete response from guardrails")
+                        env.payload['needs_clarification'] = True
+                        env.payload['clarification_reason'] = reason
+                        env.payload['clarification_message'] = message
+                        await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
+                    else:
+                        await self.log(env.conversation_id, "Error: LLM response missing required fields")
+                        env.payload['needs_clarification'] = True
+                        env.payload['clarification_reason'] = 'processing_error'
+                        env.payload['clarification_message'] = "Internal error: malformed response from guardrails"
+                else:
+                    raise json.JSONDecodeError("No valid JSON found", response_dict, 0)
+            else:
+                await self.log(env.conversation_id, "Error: Empty response from LLM")
+                env.payload['needs_clarification'] = True
+                env.payload['clarification_reason'] = 'processing_error'
+                env.payload['clarification_message'] = "Internal error: empty response from guardrails"
+                
+        except json.JSONDecodeError as e:
+            await self.log(env.conversation_id, f"JSON parsing error: {e}")
+            env.payload['needs_clarification'] = True
+            env.payload['clarification_reason'] = 'processing_error'
+            env.payload['clarification_message'] = "Internal error: JSON parsing error from guardrails"
+        return env
 
 class SearchAgent(BaseAgent):
     """Multi-level search across documentation using all metadata fields.

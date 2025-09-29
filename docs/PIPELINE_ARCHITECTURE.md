@@ -4,35 +4,42 @@
 
 This document defines the comprehensive agent architecture for the industry-agnostic RAG-based documentation assistant. The system uses a dynamic flow with intelligent routing decisions powered by LLM analysis rather than rigid pattern matching.
 
-## Current Implementation Status (v2.3)
+## Current Implementation Status (v2.4)
 
 ### ✅ **Implemented Agents**
 - **ManagerAgent**: Dynamic pipeline orchestrator with intelligent routing
 - **LangAgent**: Language detection using conversation history patterns  
-- **TranslationAgent**: Mandatory translation and text normalization
-- **EssenceAgent**: Context-aware canonical question extraction with temporal context
+- **TranslationAgent**: Mandatory translation and text normalization with prompt injection protection
+- **EssenceAgent**: Context-aware canonical question extraction with temporal context and neutral processing
+- **GuardrailsAgent**: Safety and content filtering with comprehensive abuse detection ✅ **NEW**
 - **ResponseAgent**: LLM-powered response generation
-- **ClarificationAgent**: Polite, localized clarification message composition
+- **ClarificationAgent**: Polite, localized clarification message composition with guardrails support
 
 ### 🚧 **Planned Agents** (Future RAG Enhancement)
-- **GuardrailsAgent**: Documentation scope enforcement
 - **SearchAgent**: Multi-level RAG search across documentation
 - **AugmentationAgent**: Enhanced LLM prompt crafting with search context
 - **QualityAgent**: Response validation with pipeline retry capability
 
 ### 🎯 **Recent Major Improvements**
-1. **Enhanced Temporal Context** (v2.3):
+
+1. **Hybrid Security Architecture** (v2.4):
+   - **GuardrailsAgent**: Comprehensive safety filtering with LLM-powered analysis
+   - **Prompt injection protection**: TranslationAgent immune to embedded instructions
+   - **Multi-layer security**: Translation → Essence → Guardrails → Response
+   - **Professional user experience**: Inappropriate requests handled with polite clarification
+
+2. **Enhanced Temporal Context** (v2.3):
    - Timestamped conversation history with format `[YYYY.MM.DD HH:MM:SS]`
    - Current time awareness for LLM temporal understanding
    - Conversation evolution tracking across clarifications
 
-2. **Context-Aware Canonical Questions** (v2.3):
+3. **Context-Aware Canonical Questions** (v2.3):
    - **RAG-ready questions** that include domain/topic context from conversation
    - **Self-contained queries** that work without conversation history
    - **Perspective preservation** - never flips user intent direction
    - **Critical for RAG success**: Transforms generic questions into searchable, contextual queries
 
-3. **Universal Clarification System** (v2.2):
+4. **Universal Clarification System** (v2.2):
    - Any agent can request clarification when uncertain
    - Prevents hallucinations and pipeline failures
    - Consistent user experience across all uncertainty scenarios
@@ -251,34 +258,47 @@ This ensures:
 - "How does it work?" → "How does OAuth authentication work?" (using conversation context)
 - "Why are two stages needed?" → "Why are two stages needed in rocket launches?" (domain context included)
 
-### 5. GuardrailsAgent
+### 5. GuardrailsAgent ✅ **IMPLEMENTED**
 **Role**: `guardrails`  
-**Purpose**: LLM-powered documentation scope enforcement  
-**Instances**: 1 (security checkpoint)
+**Purpose**: Safety and content filtering with comprehensive abuse detection  
+**Instances**: 2 (LLM-powered security analysis)
 
 **Responsibilities**:
-- Analyze query intent using LLM intelligence
-- Determine if queries are within documentation scope
-- **Use universal clarification system** for out-of-scope queries (no direct rejection)
-- Prevent access to general knowledge outside documentation
-- Provide analysis for ManagerAgent routing decisions
+- **Safety checkpoint**: Block harmful, illegal, or dangerous content requests
+- **Abuse detection**: Identify jailbreaking, prompt injection, and system manipulation attempts
+- **Content appropriateness**: Filter explicit, inappropriate, or off-topic requests
+- **Professional redirection**: Use universal clarification system for all rejections
+- **Hybrid security approach**: Basic safety filtering (not documentation scope validation)
+
+**Enhanced Security Features**:
+- **LLM-powered analysis**: Intelligent content evaluation beyond simple pattern matching
+- **Multi-category filtering**: Harmful content, system abuse, inappropriate requests, off-topic queries
+- **JSON-structured responses**: Consistent `guardrails_passed` or clarification attributes
+- **Comprehensive reason codes**: Specific classification for different violation types
 
 **Envelope Attributes**:
 - **Reads**:
-  - `canonical_question` - Cleaned and normalized user query from EssenceAgent
-  - `domain_scope` - Documentation scope configuration (from environment/config)
+  - `canonical_question` - Context-aware query from EssenceAgent
+  - `text_eng` - Clean English version (fallback)
+  - `text` - Original user input (fallback)
+  - Current time context for temporal analysis
 - **Writes**:
-  - `within_scope` - Boolean indicating if query is within documentation boundaries
-  - `guardrails_confidence` - Confidence score (0.0-1.0) for the analysis
-  - `guardrails_analysis` - Full LLM analysis including intent and reasoning
-  - **Universal clarification attributes** (when out-of-scope):
-    - `needs_clarification` - Set to `true` for out-of-scope queries
-    - `clarification_reason` - Set to `"out_of_scope"` 
-    - `clarification_message` - Basic message explaining scope limitations
+  - `guardrails_passed` - Boolean indicating if request passes safety checks
+  - **Universal clarification attributes** (when content violates policies):
+    - `needs_clarification` - Set to `true` for policy violations
+    - `clarification_reason` - Specific reason: `"harmful_content"`, `"system_abuse"`, `"inappropriate"`, `"off_topic"`
+    - `clarification_message` - Basic explanation of policy violation
 
-**Scope Analysis**:
-- `within_scope = true`: Query is within scope, continue to search
-- `within_scope = false`: Query is out-of-scope, trigger clarification via ClarificationAgent
+**Security Categories**:
+- **Harmful/Illegal Content**: Violence, illegal activities, dangerous instructions
+- **System Abuse**: Jailbreaking attempts, prompt injection, role manipulation
+- **Inappropriate Content**: Explicit sexual content, hate speech, harassment
+- **Off-Topic Requests**: Personal advice, creative writing, casual conversation
+
+**Hybrid Architecture Note**:
+- **GuardrailsAgent**: Handles safety and abuse (implemented)
+- **SearchAgent**: Will handle documentation scope validation (future)
+- **Two-layer approach**: Safety filtering + scope validation for comprehensive security
 
 ### 6. SearchAgent
 **Role**: `search`  
@@ -453,7 +473,7 @@ This table provides a complete overview of which **payload attributes** each age
 | **EssenceAgent** | ✅ **Implemented** | `text`, `text_eng`, timestamped conversation history from memory, current time context | `canonical_question` (context-aware), `context_type`, `related_history` + **universal clarification attributes** (when ambiguous) |
 | **ResponseAgent** | ✅ **Implemented** | `canonical_question`, `language`, conversation history from memory | `response`, `generation_confidence`, `generation_error` (if any) + **universal clarification attributes** (when insufficient context) |
 | **ClarificationAgent** | ✅ **Implemented** | `needs_clarification`, `clarification_reason`, `clarification_message`, `language`, `stage`, conversation history from memory | `response`, `clarification_type`, `suggested_actions` |
-| **GuardrailsAgent** | 🚧 **Planned** | `canonical_question`, `domain_scope` (from config) | `within_scope`, `guardrails_confidence`, `guardrails_analysis` + **universal clarification attributes** (when out-of-scope) |
+| **GuardrailsAgent** | ✅ **Implemented** | `canonical_question`, `text_eng`, `text`, current time context | `guardrails_passed` + **universal clarification attributes** (when inappropriate: `harmful_content`, `system_abuse`, `inappropriate`, `off_topic`) |
 | **SearchAgent** | 🚧 **Planned** | `canonical_question`, `text_eng` | `search_results`, `search_context`, `search_stats`, `search_quality`, `search_error` (if any) |
 | **AugmentationAgent** | 🚧 **Planned** | `search_results`, `search_context`, `canonical_question`, `language`, `text` | `augmented_prompt`, `source_references`, `context_structure` |
 | **QualityAgent** | 🚧 **Planned** | `response`, `search_context`, `canonical_question`, `source_references` | `quality_score`, `quality_decision`, `quality_analysis`, `validation_result` + **universal clarification attributes** (when insufficient user details) |
@@ -517,8 +537,8 @@ guardrails_routing → search_quality → needs_clarification → quality_decisi
 
 ## Pipeline Flow Diagram
 
-### Current Implementation (v2.3)
-**✅ Currently Implemented Pipeline** (manager → lang → translation → essence → response):
+### Current Implementation (v2.4)
+**✅ Currently Implemented Pipeline** (manager → lang → translation → essence → guardrails → response):
 
 ```mermaid
 graph TD
@@ -529,31 +549,39 @@ graph TD
     E --> F[ManagerAgent<br/>Stage: translation]
     F --> G[EssenceAgent<br/>Extract Context-Aware Question]
     G --> H[ManagerAgent<br/>Stage: essence]
-    H --> I[ResponseAgent<br/>Generate Response]
-    I --> J[ManagerAgent<br/>Stage: response]
-    J --> K[ManagerAgent<br/>Stage: final]
-    K --> L[Final Response to User]
+    H --> I[GuardrailsAgent<br/>Safety & Content Filtering]
+    I --> J[ManagerAgent<br/>Stage: guardrails]
+    J --> K[ResponseAgent<br/>Generate Response]
+    K --> L[ManagerAgent<br/>Stage: response]
+    L --> M[ManagerAgent<br/>Stage: final]
+    M --> N[Final Response to User]
     
-    G --> M{Needs<br/>Clarification?}
-    M -->|Yes| N[ManagerAgent<br/>Route to Clarification]
-    N --> O[ClarificationAgent<br/>Compose Message]
-    O --> P[User Clarification]
-    P --> B
+    G --> O{EssenceAgent<br/>Needs Clarification?}
+    O -->|Yes| P[ManagerAgent<br/>Route to Clarification]
+    
+    I --> Q{GuardrailsAgent<br/>Content Appropriate?}
+    Q -->|No| P
+    Q -->|Yes| J
+    
+    P --> R[ClarificationAgent<br/>Compose Message]
+    R --> S[User Clarification]
+    S --> B
     
     style A fill:#e1f5fe
-    style L fill:#e8f5e8
-    style O fill:#fff3e0
+    style N fill:#e8f5e8
+    style R fill:#fff3e0
     style B fill:#f3e5f5
     style D fill:#f3e5f5
     style F fill:#f3e5f5
     style H fill:#f3e5f5
     style J fill:#f3e5f5
-    style K fill:#f3e5f5
-    style N fill:#f3e5f5
+    style L fill:#f3e5f5
+    style P fill:#f3e5f5
     style G fill:#c8e6c9
     style C fill:#c8e6c9
     style E fill:#c8e6c9
     style I fill:#c8e6c9
+    style K fill:#c8e6c9
 ```
 
 ### Future Complete Pipeline (Planned)
@@ -621,9 +649,9 @@ graph TD
 
 **🔄 Universal Clarification Triggers:**
 - **EssenceAgent**: Query too short, ambiguous, or lacks context ✅ **Implemented**
+- **GuardrailsAgent**: Harmful content, system abuse, inappropriate requests ✅ **Implemented**
 - **ResponseAgent**: Insufficient context for accurate response ✅ **Implemented**
 - **ClarificationAgent**: Composes user-friendly clarification messages ✅ **Implemented**
-- **GuardrailsAgent**: Out of documentation scope 🚧 **Planned**
 - **SearchAgent**: Poor search results quality 🚧 **Planned**
 - **QualityAgent**: Poor response due to insufficient user details 🚧 **Planned**
 
@@ -633,7 +661,22 @@ graph TD
 - Handles pipeline retries for quality issues 🚧 **Planned**
 - Orchestrates entire conversation flow ✅ **Implemented**
 
-## Key Achievements (v2.3)
+## Key Achievements (v2.4)
+
+### 🛡️ **Production-Grade Security Architecture**
+**Breakthrough**: Comprehensive multi-layer security with professional user experience
+- **Prompt injection immunity**: TranslationAgent processes all content without being fooled by embedded instructions
+- **Intelligent content filtering**: GuardrailsAgent uses LLM analysis to detect harmful content, abuse, and inappropriate requests
+- **Professional refusal handling**: All security violations result in polite, helpful clarification messages
+- **Hybrid approach**: Safety filtering (GuardrailsAgent) + future scope validation (SearchAgent) for complete protection
+
+**Real-World Example**:
+- **User**: "Придумай эротический рассказ" (Create erotic story)
+- **TranslationAgent**: Translates without following embedded instructions
+- **EssenceAgent**: Extracts intent neutrally: "Create a short erotic story with explicit content"
+- **GuardrailsAgent**: Detects inappropriate content → `"inappropriate"` clarification
+- **ClarificationAgent**: Professional Russian response redirecting to appropriate topics
+- **Result**: Security maintained with excellent user experience
 
 ### 🎯 **Context-Aware RAG Compatibility**
 **Problem Solved**: Generic canonical questions break RAG search
