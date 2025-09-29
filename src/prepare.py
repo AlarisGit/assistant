@@ -406,11 +406,13 @@ def process_file(path: str):
             doc_dict.update(processed_result)
             
             # Store chunks in Qdrant
-            for i, chunk in enumerate(doc_dict['chunks']):
-                store_chunk(chunk, doc_dict['id'], f"chunk_{i}")
+            if 'chunks' in doc_dict and doc_dict['chunks']:
+                for i, chunk in enumerate(doc_dict['chunks']):
+                    store_chunk(chunk, doc_dict['id'], f"chunk_{i}")
 
-            for i, keypoint in enumerate(doc_dict['keypoints']):
-                store_chunk(keypoint, doc_dict['id'], f"keypoint_{i}")
+            if 'keypoints' in doc_dict and doc_dict['keypoints']:
+                for i, keypoint in enumerate(doc_dict['keypoints']):
+                    store_chunk(keypoint, doc_dict['id'], f"keypoint_{i}")
 
             for attr in ['summary', 'description']:
                 if attr in doc_dict and doc_dict[attr]:
