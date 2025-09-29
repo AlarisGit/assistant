@@ -319,7 +319,7 @@ class TranslationAgent(BaseAgent):
         prompt_options = {'language': config.SUPPORTED_LANGUAGES.get(language, "English")}
         
         # Generate normalized English text
-        normalized_text = llm.generate_text('translate', text, history, prompt_options=prompt_options)
+        normalized_text = await llm.generate_text_async('translate', text, history, prompt_options=prompt_options)
         env.payload["text_eng"] = normalized_text
         
         # Store normalized content in the latest user message metadata
@@ -373,7 +373,7 @@ class EssenceAgent(BaseAgent):
             'current_time': current_time
         }
         await self.log(env.conversation_id, f"Requesting essence extraction for: '{text[:100]}...' at {current_time}")
-        response_json = llm.generate_text('essence', text, history, prompt_options=prompt_options)
+        response_json = await llm.generate_text_async('essence', text, history, prompt_options=prompt_options)
         
         await self.log(env.conversation_id, f"LLM response: {response_json}")
         
@@ -448,7 +448,7 @@ class GuardrailsAgent(BaseAgent):
         
         await self.log(env.conversation_id, f"Guardrails analysis: text='{text[:100]}...'")
 
-        response_json = llm.generate_text('guardrails', text, prompt_options=prompt_options)
+        response_json = await llm.generate_text_async('guardrails', text, prompt_options=prompt_options)
         await self.log(env.conversation_id, f"LLM response: {response_json}")
         
         try:
@@ -596,7 +596,7 @@ class ClarificationAgent(BaseAgent):
         prompt_options = {'language': language}
         prompt_options['clarification_reason'] = reason_text
         await self.log(env.conversation_id, f"Preparing clarification request in {language} for text: {text}")
-        env.payload["response"] = llm.generate_text('clarify', text, history, prompt_options=prompt_options)
+        env.payload["response"] = await llm.generate_text_async('clarify', text, history, prompt_options=prompt_options)
 
         #Flush need_clarification flag to avoid loop
         env.payload["needs_clarification"]= False
@@ -700,7 +700,7 @@ class ResponseAgent(BaseAgent):
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         prompt_options = {'language': language, 'current_time': util.get_current_time()}
         await self.log(env.conversation_id, f"Preparing response in {language} for text: {text}")
-        env.payload["response"] = llm.generate_text('sample', text, history, prompt_options=prompt_options)
+        env.payload["response"] = await llm.generate_text_async('sample', text, history, prompt_options=prompt_options)
 
         return env
 

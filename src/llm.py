@@ -4,6 +4,7 @@ import os
 import base64
 import requests
 import mimetypes
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from abc import ABC, abstractmethod
 from openai import OpenAI
@@ -76,6 +77,17 @@ class BaseProvider(ABC):
     @abstractmethod
     def generate_embedding(self, text: str, model: str, **kwargs) -> List[float]:
         """Generate text embedding"""
+        pass
+    
+    @abstractmethod
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                                 image: str = '', **kwargs) -> str:
+        """Generate text response asynchronously (supports both text and image inputs)"""
+        pass
+    
+    @abstractmethod
+    async def generate_embedding_async(self, text: str, model: str, **kwargs) -> List[float]:
+        """Generate text embedding asynchronously"""
         pass
 
 
@@ -198,6 +210,31 @@ class OpenAIProvider(BaseProvider):
         except Exception as e:
             self.logger.error(f"OpenAI embedding error: {e}")
             raise
+    
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                                 image: str = '', model: str = 'gpt-5-nano', reasoning_effort: str = 'medium', 
+                                 max_output_tokens: Optional[int] = None, use_responses_api: bool = None, **kwargs) -> str:
+        """Generate text asynchronously using OpenAI API with proper reasoning support"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_text(
+                prompt, system_prompt, history, image, model, 
+                reasoning_effort, max_output_tokens, use_responses_api, **kwargs
+            )
+        )
+    
+    async def generate_embedding_async(self, text: str, model: str = 'text-embedding-3-large', **kwargs) -> List[float]:
+        """Generate embedding asynchronously using OpenAI API"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_embedding(text, model, **kwargs)
+        )
     
     
     def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str) -> List[Dict[str, Any]]:
@@ -340,6 +377,32 @@ class GoogleProvider(BaseProvider):
             self.logger.error(f"Google embedding error: {e}")
             raise
     
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                                 image: str = '', model: str = 'gemini-2.5-flash-lite', 
+                                 thinking_budget: int = 20000, temperature: float = 1.0, 
+                                 max_output_tokens: Optional[int] = None, **kwargs) -> str:
+        """Generate text asynchronously using Gemini API with thinking budget"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_text(
+                prompt, system_prompt, history, image, model, 
+                thinking_budget, temperature, max_output_tokens, **kwargs
+            )
+        )
+    
+    async def generate_embedding_async(self, text: str, model: str = 'text-embedding-004', **kwargs) -> List[float]:
+        """Generate embedding asynchronously using Google API"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_embedding(text, model, **kwargs)
+        )
+    
 
 
 class OllamaProvider(BaseProvider):
@@ -436,6 +499,34 @@ class OllamaProvider(BaseProvider):
         except Exception as e:
             self.logger.error(f"Ollama embedding error: {e}")
             raise
+    
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                                 image: str = '', model: str = 'gpt-oss:20b', temperature: float = 0.7, 
+                                 max_tokens: Optional[int] = None, num_ctx: Optional[int] = None, 
+                                 request_timeout: Optional[Tuple[float, float]] = None,
+                                 max_image_dim: Optional[int] = None, jpeg_quality: int = 90,
+                                 **kwargs) -> str:
+        """Generate text asynchronously using Ollama API"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_text(
+                prompt, system_prompt, history, image, model, temperature, 
+                max_tokens, num_ctx, request_timeout, max_image_dim, jpeg_quality, **kwargs
+            )
+        )
+    
+    async def generate_embedding_async(self, text: str, model: str = 'mxbai-embed-large', **kwargs) -> List[float]:
+        """Generate embedding asynchronously using Ollama API"""
+        
+        # Run the synchronous method in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.generate_embedding(text, model, **kwargs)
+        )
     
     
     def _build_messages(self, prompt: str, system_prompt: str, history: List[Tuple[str, str]], image: str,
@@ -592,6 +683,68 @@ class CachedProvider(BaseProvider):
         except Exception as e:
             self.logger.warning(f"Failed to save cache (embedding): {e}")
         return emb
+    
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
+                                 image: str = '', **kwargs) -> str:
+        """Generate text asynchronously with caching"""
+        use_cache: bool = kwargs.pop('use_cache', True)
+        force_refresh: bool = kwargs.pop('force_refresh', False)
+        model = kwargs.get('model', '')
+        sanitized_kwargs = self._sanitize_kwargs(kwargs)
+
+        key = {
+            'cache_schema': 1,
+            'op': 'generate_text',
+            'provider': self.provider_name,
+            'model': model,
+            'system_prompt': system_prompt,
+            'prompt': prompt,
+            'history': history,
+            'image': image,
+            'image_fp': self._image_fingerprint(image),
+            'kwargs': sanitized_kwargs,
+        }
+
+        if use_cache and not force_refresh:
+            cached = load_cached_value(key)
+            if cached and isinstance(cached, dict) and 'response' in cached:
+                return cached['response']
+
+        # Miss: delegate to inner async method
+        response = await self.inner.generate_text_async(prompt, system_prompt, history, image, **kwargs)
+
+        try:
+            save_cached_value(key, {'response': response, 'ts': time.time()})
+        except Exception as e:
+            self.logger.warning(f"Failed to save cache (text): {e}")
+        return response
+    
+    async def generate_embedding_async(self, text: str, model: str, **kwargs) -> List[float]:
+        """Generate embedding asynchronously with caching"""
+        use_cache: bool = kwargs.pop('use_cache', True)
+        force_refresh: bool = kwargs.pop('force_refresh', False)
+        sanitized_kwargs = self._sanitize_kwargs(kwargs)
+
+        key = {
+            'cache_schema': 1,
+            'op': 'generate_embedding',
+            'provider': self.provider_name,
+            'model': model,
+            'text': text,
+            'kwargs': sanitized_kwargs,
+        }
+
+        if use_cache and not force_refresh:
+            cached = load_cached_value(key)
+            if cached and isinstance(cached, dict) and 'embedding' in cached:
+                return cached['embedding']
+
+        emb = await self.inner.generate_embedding_async(text, model, **kwargs)
+        try:
+            save_cached_value(key, {'embedding': emb, 'ts': time.time()})
+        except Exception as e:
+            self.logger.warning(f"Failed to save cache (embedding): {e}")
+        return emb
 
 
 # Provider factory and cache
@@ -715,6 +868,39 @@ def get_summarization(text: str, model_provider: str = config.SUM_MODEL, prompt_
 def get_image_description(image: str, model_provider: str = config.VSN_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
     """Generate image description using vision capabilities"""
     return generate_text('vsn', text='', image=image, model_provider=model_provider, prompt_options=prompt_options)
+
+# Async wrapper functions for assistant.py
+async def get_embedding_async(text: str, model_provider: str = config.EMB_MODEL, prompt_options: Dict[str, Any] = {}) -> List[float]:
+    """Generate text embedding asynchronously using specified model and provider"""
+    model, provider_name = _parse_model(model_provider)
+    prompt = _get_prompt('usr', 'emb', model, provider_name, prompt_options)
+    sys_prompt = _get_prompt('sys', 'emb', model, provider_name, prompt_options)
+
+    emb_text = f"{sys_prompt + '\n\n' if sys_prompt else ''}{prompt + '\n\n' if prompt else ''}{text}"
+
+    provider = get_provider(provider_name)
+    return await provider.generate_embedding_async(emb_text, model)
+
+async def generate_text_async(action: str, text: str = '', history: List[Tuple[str, str]] = [], image: str = '',
+                            model_provider: str = config.GEN_MODEL, prompt_options: Optional[Dict[str, Any]] = None, **kwargs) -> str:
+    """Generate text response asynchronously using specified model and provider"""
+    model, provider_name = _parse_model(model_provider)
+    
+    usr_prompt = _get_prompt('usr', action, model, provider_name, prompt_options)
+    sys_prompt = _get_prompt('sys', action, model, provider_name, prompt_options)
+
+    prompt = f"{usr_prompt + '\n\n' if usr_prompt else ''}{text}"    
+
+    provider = get_provider(provider_name)
+    return await provider.generate_text_async(prompt, sys_prompt, history, image, model=model, action=action, **kwargs)
+
+async def get_summarization_async(text: str, model_provider: str = config.SUM_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
+    """Generate text summarization asynchronously"""
+    return await generate_text_async('sum', text, model_provider=model_provider, prompt_options=prompt_options)
+
+async def get_image_description_async(image: str, model_provider: str = config.VSN_MODEL, prompt_options: Dict[str, Any] = {}) -> str:
+    """Generate image description asynchronously using vision capabilities"""
+    return await generate_text_async('vsn', text='', image=image, model_provider=model_provider, prompt_options=prompt_options)
 
 if __name__ == '__main__':
     test_text_models = [

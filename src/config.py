@@ -105,6 +105,9 @@ else:
     logger.warning(f"Prompts directory {PROMPTS_DIR} does not exist.")
     sys.exit(1)
 
+ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 300))
+ASSISTANT_HISTORY_LIMIT = int(os.getenv("ASSISTANT_HISTORY_LIMIT", 10))
+
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", 11434))
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -132,11 +135,11 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
 
 # Redis Connection Pool Configuration
-REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "100"))  # Pool size
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "200"))  # Pool size
 REDIS_RETRY_ON_TIMEOUT = os.getenv("REDIS_RETRY_ON_TIMEOUT", "true").lower() == "true"
 REDIS_RETRY_ON_ERROR = os.getenv("REDIS_RETRY_ON_ERROR", "true").lower() == "true"
 REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "3"))
-REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "70.0"))  # seconds - must be > ASSISTANT_TIMEOUT
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", ASSISTANT_TIMEOUT+5))  # seconds - must be > ASSISTANT_TIMEOUT
 REDIS_SOCKET_CONNECT_TIMEOUT = float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0"))  # seconds
 REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))  # seconds
 
@@ -148,9 +151,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_INVITE_CODE = os.getenv("TELEGRAM_INVITE_CODE", "")
 
 DOC_BASE_URL = os.getenv("DOC_BASE_URL", "")
-
-ASSISTANT_TIMEOUT = int(os.getenv("ASSISTANT_TIMEOUT", 300))
-ASSISTANT_HISTORY_LIMIT = int(os.getenv("ASSISTANT_HISTORY_LIMIT", 10))
 
 # Stream message expiration - messages older than this are considered stale
 # Should be same as ASSISTANT_TIMEOUT since that's the max time we wait for responses

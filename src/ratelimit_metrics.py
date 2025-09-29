@@ -2,6 +2,7 @@ import time
 import threading
 import logging
 import atexit
+import asyncio
 from typing import Dict, Any, List, Optional, Tuple
 
 import config
@@ -294,6 +295,84 @@ class RateLimitedMetricsProvider:
                 time.sleep(retry_after)
                 try:
                     emb = self.inner.generate_embedding(text, model, **kwargs)
+                    latency_ms = (_now() - t0) * 1000.0
+                    _metrics.record(self.provider_name, model, 'emb', latency_ms, in_tok, 0, False, retries)
+                    return emb
+                except Exception as e2:
+                    _metrics.record(self.provider_name, model, 'emb', (_now() - t0) * 1000.0, in_tok, 0, True, retries)
+                    raise e2
+            _metrics.record(self.provider_name, model, 'emb', (_now() - t0) * 1000.0, in_tok, 0, True, retries)
+            raise
+    
+    async def generate_text_async(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [],
+                                 image: str = '', action: Optional[str] = None, **kwargs) -> str:
+        """Generate text asynchronously with rate limiting and metrics"""
+        model = kwargs.get('model', '')
+        # Estimate input tokens
+        in_tok = _estimate_tokens(system_prompt) + _estimate_tokens(prompt)
+        if history:
+            for u, a in history:
+                in_tok += _estimate_tokens(u) + _estimate_tokens(a)
+        # Images are ignored for TPM by default
+        
+        # Run rate limiting in thread pool to avoid blocking async loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: self._enforce_limits(model, in_tok))
+
+        t0 = _now()
+        retries = 0
+        try:
+            resp = await self.inner.generate_text_async(prompt, system_prompt, history, image, **kwargs)
+            latency_ms = (_now() - t0) * 1000.0
+            out_tok = self._estimate_output_tokens(resp)
+            _metrics.record(self.provider_name, model, action or 'rsp', latency_ms, in_tok, out_tok, False, retries)
+            return resp
+        except Exception as e:
+            # Basic 429 handling by message sniffing
+            retry_after = 0.0
+            msg = str(e).lower()
+            if '429' in msg or 'rate limit' in msg:
+                retry_after = 2.0
+            if retry_after > 0 and retries < 2:
+                retries += 1
+                await asyncio.sleep(retry_after)  # Use async sleep
+                try:
+                    resp = await self.inner.generate_text_async(prompt, system_prompt, history, image, **kwargs)
+                    latency_ms = (_now() - t0) * 1000.0
+                    out_tok = self._estimate_output_tokens(resp)
+                    _metrics.record(self.provider_name, model, action or 'rsp', latency_ms, in_tok, out_tok, False, retries)
+                    return resp
+                except Exception as e2:
+                    _metrics.record(self.provider_name, model, action or 'rsp', (_now() - t0) * 1000.0, in_tok, 0, True, retries)
+                    raise e2
+            _metrics.record(self.provider_name, model, action or 'rsp', (_now() - t0) * 1000.0, in_tok, 0, True, retries)
+            raise
+
+    async def generate_embedding_async(self, text: str, model: str, **kwargs) -> List[float]:
+        """Generate embedding asynchronously with rate limiting and metrics"""
+        in_tok = _estimate_tokens(text)
+        
+        # Run rate limiting in thread pool to avoid blocking async loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: self._enforce_limits(model, in_tok))
+        
+        t0 = _now()
+        retries = 0
+        try:
+            emb = await self.inner.generate_embedding_async(text, model, **kwargs)
+            latency_ms = (_now() - t0) * 1000.0
+            _metrics.record(self.provider_name, model, 'emb', latency_ms, in_tok, 0, False, retries)
+            return emb
+        except Exception as e:
+            msg = str(e).lower()
+            retry_after = 0.0
+            if '429' in msg or 'rate limit' in msg:
+                retry_after = 2.0
+            if retry_after > 0 and retries < 2:
+                retries += 1
+                await asyncio.sleep(retry_after)  # Use async sleep
+                try:
+                    emb = await self.inner.generate_embedding_async(text, model, **kwargs)
                     latency_ms = (_now() - t0) * 1000.0
                     _metrics.record(self.provider_name, model, 'emb', latency_ms, in_tok, 0, False, retries)
                     return emb
