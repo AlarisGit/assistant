@@ -166,12 +166,8 @@ class ManagerAgent(BaseAgent):
             env.payload["stage"] = "lang"
             return env
 
-#        if stage == "translation": #Temporary block for clarification testing
-#            env.payload["needs_clarification"] = True
-#            env.payload["clarification_reason"] = "not_enough_info"
-#            env.payload["clarification_message"] = "I need more information to translate this text. Please provide more details."
         
-        if 'needs_clarification' in env.payload and env.payload['needs_clarification']:
+        if 'clarify_request' in env.payload:
             env.target_role = "clarification"
             env.payload["stage"] = "clarification"
             return env
@@ -385,29 +381,20 @@ class EssenceAgent(BaseAgent):
                     canonical_q = response_dict['canonical_question']
                     env.payload['canonical_question'] = canonical_q
                     await self.log(env.conversation_id, f"Extracted canonical question: '{canonical_q}'")
-                elif 'clarification_reason' in response_dict:
-                    reason = response_dict['clarification_reason']
-                    message = response_dict.get('clarification_message', "Please provide more details to help me understand your question.")
-                    env.payload['needs_clarification'] = True
-                    env.payload['clarification_reason'] = reason
-                    env.payload['clarification_message'] = message
-                    await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
+                elif 'clarify_request' in response_dict:
+                    clarify_request = response_dict['clarify_request']
+                    env.payload['clarify_request'] = clarify_request
+                    await self.log(env.conversation_id, f"Requesting clarification: {clarify_request}")
                 else:
                     await self.log(env.conversation_id, "Error: LLM response missing required fields")
-                    env.payload['needs_clarification'] = True
-                    env.payload['clarification_reason'] = 'processing_error'
-                    env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
+                    env.payload['clarify_request'] = 'processing_error'
             else:
                 await self.log(env.conversation_id, "Error: No JSON found in LLM response")
-                env.payload['needs_clarification'] = True
-                env.payload['clarification_reason'] = 'processing_error'
-                env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
+                env.payload['clarify_request'] = 'processing_error'
                 
         except json.JSONDecodeError as e:
             await self.log(env.conversation_id, f"JSON parsing error: {e}")
-            env.payload['needs_clarification'] = True
-            env.payload['clarification_reason'] = 'processing_error'
-            env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
+            env.payload['clarify_request'] = 'processing_error'
         return env
 
 
@@ -451,29 +438,20 @@ class GuardrailsAgent(BaseAgent):
                 if 'guardrails_passed' in response_dict:
                     env.payload['guardrails_passed'] = response_dict['guardrails_passed']
                     await self.log(env.conversation_id, f"Guardrails passed: {response_dict['guardrails_passed']}")
-                elif 'clarification_reason' in response_dict:
-                    reason = response_dict['clarification_reason']
-                    message = response_dict.get('clarification_message', "Internal error: incomplete response from guardrails")
-                    env.payload['needs_clarification'] = True
-                    env.payload['clarification_reason'] = reason
-                    env.payload['clarification_message'] = message
-                    await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
+                elif 'clarify_request' in response_dict:
+                    clarify_request = response_dict['clarify_request']
+                    env.payload['clarify_request'] = clarify_request
+                    await self.log(env.conversation_id, f"Requesting clarification: {clarify_request}")
                 else:
                     await self.log(env.conversation_id, "Error: LLM response missing required fields")
-                    env.payload['needs_clarification'] = True
-                    env.payload['clarification_reason'] = 'processing_error'
-                    env.payload['clarification_message'] = "Internal error: malformed response from guardrails"
+                    env.payload['clarify_request'] = 'processing_error'
             else:
                 await self.log(env.conversation_id, "Error: No JSON found in LLM response")
-                env.payload['needs_clarification'] = True
-                env.payload['clarification_reason'] = 'processing_error'
-                env.payload['clarification_message'] = "Internal error: no JSON found in guardrails response"
+                env.payload['clarify_request'] = 'processing_error'
                 
         except json.JSONDecodeError as e:
             await self.log(env.conversation_id, f"JSON parsing error: {e}")
-            env.payload['needs_clarification'] = True
-            env.payload['clarification_reason'] = 'processing_error'
-            env.payload['clarification_message'] = "Internal error: JSON parsing error from guardrails"
+            env.payload['clarify_request'] = 'processing_error'
         return env
 
 class SearchAgent(BaseAgent):
@@ -529,9 +507,7 @@ class SearchAgent(BaseAgent):
         
         # Request clarification if search quality is poor
         if search_quality == "poor":
-            env.payload["needs_clarification"] = True
-            env.payload["clarification_reason"] = "missing_details"
-            env.payload["clarification_message"] = "Search results are insufficient - need more specific details"
+            env.payload["clarify_request"] = "insufficient_details"
             await self.log(env.conversation_id, "Requesting clarification: poor search quality")
         else:
             await self.log(env.conversation_id, f"Search completed: {len(search_results)} results, quality: {search_quality}")
@@ -555,24 +531,17 @@ class ClarificationAgent(BaseAgent):
     async def process(self, env: Envelope) -> Envelope:
         """Process clarification message composition request.
         
-        Reads: needs_clarification, clarification_reason, clarification_message, language, stage, conversation history
-        Writes: response, clarification_type, suggested_actions
+        Reads: clarify_request, language, stage, conversation history
+        Writes: response
         """
         # Extract input attributes
-        needs_clarification = env.payload.get("needs_clarification", False)
-        clarification_reason = env.payload.get("clarification_reason", "")
-        clarification_message = env.payload.get("clarification_message", "")
+        clarify_request = env.payload.get("clarify_request", "")
 
-        if not needs_clarification:
+        if not clarify_request:
             await self.log(env.conversation_id, "No clarification needed - skipping")
             return env
-        
-        # Format clarification reason with additional context if available
-        reason_text = clarification_reason
-        if clarification_message:
-            reason_text += f" ({clarification_message})"
             
-        await self.log(env.conversation_id, f"Clarification requested: {reason_text}")
+        await self.log(env.conversation_id, f"Clarification requested: {clarify_request}")
         
         memory = await self.get_memory(env.conversation_id)
         history = await memory.get_history(limit=config.ASSISTANT_HISTORY_LIMIT, normalized=False)
@@ -580,21 +549,12 @@ class ClarificationAgent(BaseAgent):
         language = config.SUPPORTED_LANGUAGES.get(env.payload.get("language", "en"), "English")
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         prompt_options = {'language': language}
-        prompt_options['clarification_reason'] = reason_text
+        prompt_options['clarify_request'] = clarify_request
         await self.log(env.conversation_id, f"Preparing clarification request in {language} for text: {text}")
         env.payload["response"] = await llm.generate_text_async('clarify', text, history, prompt_options=prompt_options)
 
-        #Flush need_clarification flag to avoid loop
-        env.payload["needs_clarification"]= False
-        env.payload["clarification_reason"] = ""
-        env.payload["clarification_message"] = ""
-        #reason_templates = {
-        #    "insufficient_context": "I need more context to understand your request better.",
-        #    "missing_details": "Could you provide more specific details about what you're looking for?",
-        #    "out_of_scope": "This question appears to be outside our documentation scope. Could you rephrase it to focus on our documented features?",
-        #    "quality_insufficient": "I couldn't provide a complete answer with the available information. Could you be more specific?",
-        #    "ambiguous_query": "Your question could be interpreted in multiple ways. Could you clarify what specifically you're asking about?"
-        #}
+        # Clear clarification request to avoid loop
+        del env.payload["clarify_request"]
         
         return env
 
@@ -700,9 +660,7 @@ class ResponseAgent(BaseAgent):
         
         if len(augmented_prompt.strip()) < 50:
             # Request clarification when documentation context is insufficient
-            env.payload["needs_clarification"] = True
-            env.payload["clarification_reason"] = "insufficient_context"
-            env.payload["clarification_message"] = "The available documentation doesn't contain enough information to answer your specific question"
+            env.payload["clarify_request"] = "insufficient_context"
             await self.log(env.conversation_id, "Requesting clarification: insufficient documentation context")
         else:
             env.payload["response"] = f"This is a placeholder response for: {canonical_question}"
@@ -764,9 +722,7 @@ class QualityAgent(BaseAgent):
         else:
             # Insufficient user details - request clarification
             env.payload["quality_decision"] = "approve"  # Don't block, let clarification handle it
-            env.payload["needs_clarification"] = True
-            env.payload["clarification_reason"] = "quality_insufficient"
-            env.payload["clarification_message"] = "The response quality is poor, likely due to insufficient details in your question"
+            env.payload["clarify_request"] = "insufficient_details"
             await self.log(env.conversation_id, f"Requesting clarification: poor quality due to insufficient user details")
         
         return env

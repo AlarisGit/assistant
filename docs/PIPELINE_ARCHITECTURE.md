@@ -103,18 +103,15 @@ This ensures:
 **Critical Design Rule**: Any agent can request clarification when uncertain, preventing hallucinations and pipeline failures.
 
 **Clarification Protocol**:
-- **Any agent** can set `needs_clarification = true` when uncertain about user intent, scope, context, or quality
-- **Requesting agent** should also set `clarification_reason` and basic `clarification_message`
+- **Any agent** can set `clarify_request` when uncertain about user intent, scope, context, or quality
 - **ManagerAgent** detects clarification requests and routes to **ClarificationAgent**
 - **ClarificationAgent** crafts polite, comprehensive, localized user responses for ALL refusal scenarios
 - **No agent** should hallucinate or fail silently when facing any uncertainty
 
 **Clarification as Universal Refusal**: Clarification is the polite, professional way to refuse answering regardless of reason (ambiguity, vagueness, out-of-scope, insufficient details, quality issues).
 
-**Universal Clarification Attributes** (any agent can write):
-- `needs_clarification` - Boolean indicating uncertainty requiring user input
-- `clarification_reason` - Reason code: "ambiguous_query", "insufficient_context", "scope_unclear", "multiple_topics", "missing_details", "out_of_scope", "quality_insufficient"
-- `clarification_message` - Agent-specific message explaining what clarification is needed
+**Universal Clarification Attribute** (any agent can write):
+- `clarify_request` - Descriptive reason indicating what clarification is needed: "ambiguous_query", "insufficient_context", "missing_details", "out_of_scope", "processing_error", "inappropriate_content", etc.
 
 **Benefits**:
 - **Prevents hallucinations**: Agents request clarification instead of guessing
@@ -134,7 +131,7 @@ This ensures:
 **Responsibilities**:
 - **Exclusive routing authority**: Only agent that sets `target_role` and controls message flow
 - FSM-based pipeline orchestration based on other agents' outputs
-- **Unified clarification handling**: Detects `needs_clarification` from any agent and crafts user responses
+- **Unified clarification handling**: Detects `clarify_request` from any agent and routes to ClarificationAgent
 - Dynamic routing decisions based on LLM analysis results
 - Conversation memory integration and user preference tracking
 - Pipeline interruption and return handling
@@ -150,9 +147,7 @@ This ensures:
   - `language` - Detected user language from LangAgent
   - `within_scope` - Boolean indicating if query is within documentation scope
   - `search_quality` - Search result quality: "excellent", "good", or "poor"
-  - `needs_clarification` - Boolean indicating if ANY agent needs clarification (universal)
-  - `clarification_reason` - Reason code from clarifying agent (universal)
-  - `clarification_message` - Agent-specific clarification message (universal)
+  - `clarify_request` - Descriptive reason from any agent indicating clarification needed (universal)
   - `clarification_result` - User's response to clarification: "search_again" or "exit"
   - `quality_decision` - Quality control decision: "approve", "clarify", "research", or "regenerate"
 - **Writes**:
@@ -244,10 +239,8 @@ This ensures:
   - `canonical_question` - **Context-aware**, self-contained query ready for RAG search
   - `context_type` - Type of context: "new_topic", "follow_up", "clarification"
   - `related_history` - Relevant previous messages that provide context
-  - **Universal clarification attributes** (when query too ambiguous):
-    - `needs_clarification` - Set to `true` when user intent unclear
-    - `clarification_reason` - Set to `"ambiguous_query"`, `"missing_context"`, `"vague_request"`, etc.
-    - `clarification_message` - Basic message explaining what clarification is needed
+  - **Universal clarification attribute** (when query too ambiguous):
+    - `clarify_request` - Set to descriptive reason when user intent unclear: `"ambiguous_query"`, `"missing_context"`, `"vague_request"`, etc.
 
 **Critical RAG Enhancement**:
 - **BEFORE**: "Why are two stages needed?" (generic, RAG search fails)
@@ -284,10 +277,8 @@ This ensures:
   - Current time context for temporal analysis
 - **Writes**:
   - `guardrails_passed` - Boolean indicating if request passes safety checks
-  - **Universal clarification attributes** (when content violates policies):
-    - `needs_clarification` - Set to `true` for policy violations
-    - `clarification_reason` - Specific reason: `"harmful_content"`, `"system_abuse"`, `"inappropriate"`, `"off_topic"`
-    - `clarification_message` - Basic explanation of policy violation
+  - **Universal clarification attribute** (when content violates policies):
+    - `clarify_request` - Specific reason for policy violation: `"harmful_content"`, `"system_abuse"`, `"inappropriate"`, `"off_topic"`
 
 **Security Categories**:
 - **Harmful/Illegal Content**: Violence, illegal activities, dangerous instructions
@@ -343,9 +334,7 @@ This ensures:
 
 **Envelope Attributes**:
 - **Reads**:
-  - `needs_clarification` - Boolean from requesting agent indicating uncertainty
-  - `clarification_reason` - Reason code from requesting agent
-  - `clarification_message` - Basic message from requesting agent
+  - `clarify_request` - Descriptive reason from requesting agent indicating what clarification is needed
   - `language` - User's preferred language for response localization
   - `stage` - Current pipeline stage to understand context
   - Conversation history from memory for context
@@ -404,10 +393,8 @@ This ensures:
   - `sources_used` - Array of documentation sources referenced in response
   - `generation_confidence` - LLM confidence score for the generated response (0.0-1.0)
   - `generation_error` - Error message if LLM generation fails (optional)
-  - **Universal clarification attributes** (when documentation insufficient):
-    - `needs_clarification` - Set to `true` when documentation doesn't contain sufficient info for user's question
-    - `clarification_reason` - Set to `"insufficient_context"` or `"missing_details"`
-    - `clarification_message` - Basic message explaining what specific information is missing from documentation
+  - **Universal clarification attribute** (when documentation insufficient):
+    - `clarify_request` - Set to `"insufficient_context"` when documentation doesn't contain sufficient info for user's question
 
 **Constraints**:
 - Only use provided documentation context
@@ -438,10 +425,8 @@ This ensures:
   - `quality_decision` - Routing decision: "approve", "research", or "regenerate"
   - `quality_analysis` - Detailed LLM analysis of response quality and issues
   - `validation_result` - Structured validation results including accuracy and scope compliance
-  - **Universal clarification attributes** (when user details insufficient):
-    - `needs_clarification` - Set to `true` when response fails due to insufficient user details
-    - `clarification_reason` - Set to `"quality_insufficient"`
-    - `clarification_message` - Basic message explaining what additional details are needed
+  - **Universal clarification attribute** (when user details insufficient):
+    - `clarify_request` - Set to `"insufficient_details"` when response fails due to insufficient user details
 
 **Quality Routing**:
 - `approve`: Response is good, send to user
@@ -457,26 +442,24 @@ This table provides a complete overview of which **payload attributes** each age
 - **All listed attributes are within `envelope.payload` dictionary**
 - **Only ManagerAgent** writes `target_role` (envelope system attribute)
 - **All other agents** use default routing to return results to ManagerAgent
-- **Any agent** can write universal clarification attributes when uncertain
+- **Any agent** can write universal clarification attribute when uncertain
 - **Agents NEVER modify** envelope system attributes directly
 
-**Universal Clarification Attributes** (any agent can write):
-- `needs_clarification` - Boolean indicating uncertainty requiring user input
-- `clarification_reason` - Reason code for clarification request
-- `clarification_message` - Agent-specific message explaining what's needed
+**Universal Clarification Attribute** (any agent can write):
+- `clarify_request` - Descriptive reason indicating what clarification is needed
 
 | Agent | Status | Reads | Writes |
 |-------|--------|-------|--------|
-| **ManagerAgent** | ✅ **Implemented** | `stage`, `language`, `needs_clarification`, `clarification_reason`, `clarification_message`, `response` | `stage`, `response` (for final/rejection messages) + **`target_role`** (system attribute) |
+| **ManagerAgent** | ✅ **Implemented** | `stage`, `language`, `clarify_request`, `response` | `stage`, `response` (for final/rejection messages) + **`target_role`** (system attribute) |
 | **LangAgent** | ✅ **Implemented** | `text` (user query), conversation history from memory | `language`, `confidence` |
 | **TranslationAgent** | ✅ **Implemented** | `text`, `language` | `text_eng`, `translation_confidence`, `corrections_made` |
-| **EssenceAgent** | ✅ **Implemented** | `text`, `text_eng`, timestamped conversation history from memory, current time context | `canonical_question` (context-aware), `context_type`, `related_history` + **universal clarification attributes** (when ambiguous) |
-| **ResponseAgent** | ✅ **Implemented** | `canonical_question`, `language`, conversation history from memory | `response`, `generation_confidence`, `generation_error` (if any) + **universal clarification attributes** (when insufficient context) |
-| **ClarificationAgent** | ✅ **Implemented** | `needs_clarification`, `clarification_reason`, `clarification_message`, `language`, `stage`, conversation history from memory | `response`, `clarification_type`, `suggested_actions` |
-| **GuardrailsAgent** | ✅ **Implemented** | `canonical_question`, `text_eng`, `text`, current time context | `guardrails_passed` + **universal clarification attributes** (when inappropriate: `harmful_content`, `system_abuse`, `inappropriate`, `off_topic`) |
+| **EssenceAgent** | ✅ **Implemented** | `text`, `text_eng`, timestamped conversation history from memory, current time context | `canonical_question` (context-aware), `context_type`, `related_history` + **universal clarification attribute** (when ambiguous) |
+| **ResponseAgent** | ✅ **Implemented** | `canonical_question`, `language`, conversation history from memory | `response`, `generation_confidence`, `generation_error` (if any) + **universal clarification attribute** (when insufficient context) |
+| **ClarificationAgent** | ✅ **Implemented** | `clarify_request`, `language`, `stage`, conversation history from memory | `response`, `clarification_type`, `suggested_actions` |
+| **GuardrailsAgent** | ✅ **Implemented** | `canonical_question`, `text_eng`, `text`, current time context | `guardrails_passed` + **universal clarification attribute** (when inappropriate: `harmful_content`, `system_abuse`, `inappropriate`, `off_topic`) |
 | **SearchAgent** | 🚧 **Planned** | `canonical_question`, `text_eng` | `search_results`, `search_context`, `search_stats`, `search_quality`, `search_error` (if any) |
 | **AugmentationAgent** | 🚧 **Planned** | `search_results`, `search_context`, `canonical_question`, `language`, `text` | `augmented_prompt`, `source_references`, `context_structure` |
-| **QualityAgent** | 🚧 **Planned** | `response`, `search_context`, `canonical_question`, `source_references` | `quality_score`, `quality_decision`, `quality_analysis`, `validation_result` + **universal clarification attributes** (when insufficient user details) |
+| **QualityAgent** | 🚧 **Planned** | `response`, `search_context`, `canonical_question`, `source_references` | `quality_score`, `quality_decision`, `quality_analysis`, `validation_result` + **universal clarification attribute** (when insufficient user details) |
 
 ### Envelope Structure and Attribute Separation
 
@@ -532,7 +515,7 @@ canonical_question → search_results, search_context → augmented_prompt → r
 
 **Quality and Routing Chain:**
 ```
-guardrails_routing → search_quality → needs_clarification → quality_decision
+guardrails_routing → search_quality → clarify_request → quality_decision
 ```
 
 ## Pipeline Flow Diagram
@@ -656,7 +639,7 @@ graph TD
 - **QualityAgent**: Poor response due to insufficient user details 🚧 **Planned**
 
 **🎯 ManagerAgent Routing Logic:**
-- Detects `needs_clarification = true` from any agent ✅ **Implemented**
+- Detects `clarify_request` from any agent ✅ **Implemented**
 - Routes to ClarificationAgent for user-friendly message composition ✅ **Implemented**
 - Handles pipeline retries for quality issues 🚧 **Planned**
 - Orchestrates entire conversation flow ✅ **Implemented**
@@ -709,7 +692,7 @@ graph TD
 
 - **Input Attributes**: `text`, `canonical_question`, `text_eng`
 - **Analysis Results**: `language`, `confidence`, `search_quality`, `quality_score`
-- **Routing Decisions**: `within_scope`, `needs_clarification`, `quality_decision`
+- **Routing Decisions**: `within_scope`, `clarify_request`, `quality_decision`
 - **Generated Content**: `response`, `augmented_prompt`, `clarification_type`
 - **Metadata**: `source_references`, `search_stats`, `context_structure`
 - **Error Handling**: `search_error`, `generation_error`

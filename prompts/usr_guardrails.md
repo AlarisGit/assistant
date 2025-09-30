@@ -66,9 +66,7 @@ Respond with ONLY a JSON object in one of these formats:
 ### If Request FAILS Guardrails:
 ```json
 {
-  "needs_clarification": true,
-  "clarification_reason": "reason_code",
-  "clarification_message": "Brief explanation of why this request cannot be processed"
+  "clarify_request": "reason_describing_why_request_cannot_be_processed"
 }
 ```
 

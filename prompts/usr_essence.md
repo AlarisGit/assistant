@@ -39,8 +39,7 @@ You must respond with valid JSON in one of these two formats:
 **Format 2 - Unclear Intent (when clarification is needed):**
 ```json
 {
-  "clarification_reason": "specific_reason_code",
-  "clarification_message": "Brief explanation of what needs clarification"
+  "clarify_request": "specific_reason_describing_what_needs_clarification"
 }
 ```
 
@@ -60,8 +59,7 @@ You must respond with valid JSON in one of these two formats:
 **Output:** 
 ```json
 {
-  "clarification_reason": "missing_context",
-  "clarification_message": "Authentication method not specified - could be API keys, OAuth, JWT, or other methods"
+  "clarify_request": "missing_context_authentication_method_not_specified"
 }
 ```
 
@@ -77,8 +75,7 @@ You must respond with valid JSON in one of these two formats:
 **Output:**
 ```json
 {
-  "clarification_reason": "pronoun_confusion",
-  "clarification_message": "Reference to 'other thing' is unclear - please specify which topic or feature you're asking about"
+  "clarify_request": "pronoun_confusion_unclear_reference_to_other_thing"
 }
 ```
 
@@ -160,8 +157,7 @@ You must respond with valid JSON in one of these two formats:
 - You are a system agent working in English
 - Always output JSON with English text content
 - The `canonical_question` should be in English for internal processing
-- The `clarification_reason` must be in English (system codes)
-- The `clarification_message` must be in English for ClarificationAgent processing
+- The `clarify_request` must be in English (system processing)
 - Analyze conversations in any language, but respond in English
 
 **Current time:** {current_time}
