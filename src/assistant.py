@@ -373,42 +373,35 @@ class EssenceAgent(BaseAgent):
             'current_time': current_time
         }
         await self.log(env.conversation_id, f"Requesting essence extraction for: '{text[:100]}...' at {current_time}")
-        response_json = await llm.generate_text_async('essence', text, history, prompt_options=prompt_options)
+        response_text = await llm.generate_text_async('essence', text, history, prompt_options=prompt_options)
         
-        await self.log(env.conversation_id, f"LLM response: {response_json}")
+        await self.log(env.conversation_id, f"LLM response: {response_text}")
         
         try:
-            if response_json and response_json.strip():
-                # Clean up response - sometimes LLM adds extra text around JSON
-                json_start = response_json.find('{')
-                json_end = response_json.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    clean_json = response_json[json_start:json_end]
-                    response_dict = json.loads(clean_json)
-                    
-                    if 'canonical_question' in response_dict:
-                        canonical_q = response_dict['canonical_question']
-                        env.payload['canonical_question'] = canonical_q
-                        await self.log(env.conversation_id, f"Extracted canonical question: '{canonical_q}'")
-                    elif 'clarification_reason' in response_dict:
-                        reason = response_dict['clarification_reason']
-                        message = response_dict.get('clarification_message', "Please provide more details to help me understand your question.")
-                        env.payload['needs_clarification'] = True
-                        env.payload['clarification_reason'] = reason
-                        env.payload['clarification_message'] = message
-                        await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
-                    else:
-                        await self.log(env.conversation_id, "Error: LLM response missing required fields")
-                        env.payload['needs_clarification'] = True
-                        env.payload['clarification_reason'] = 'processing_error'
-                        env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
+            response_text, response_dict = llm.parse_response(response_text)
+            
+            if response_dict:
+                if 'canonical_question' in response_dict:
+                    canonical_q = response_dict['canonical_question']
+                    env.payload['canonical_question'] = canonical_q
+                    await self.log(env.conversation_id, f"Extracted canonical question: '{canonical_q}'")
+                elif 'clarification_reason' in response_dict:
+                    reason = response_dict['clarification_reason']
+                    message = response_dict.get('clarification_message', "Please provide more details to help me understand your question.")
+                    env.payload['needs_clarification'] = True
+                    env.payload['clarification_reason'] = reason
+                    env.payload['clarification_message'] = message
+                    await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
                 else:
-                    raise json.JSONDecodeError("No valid JSON found", response_json, 0)
+                    await self.log(env.conversation_id, "Error: LLM response missing required fields")
+                    env.payload['needs_clarification'] = True
+                    env.payload['clarification_reason'] = 'processing_error'
+                    env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
             else:
-                await self.log(env.conversation_id, "Error: Empty response from LLM")
+                await self.log(env.conversation_id, "Error: No JSON found in LLM response")
                 env.payload['needs_clarification'] = True
                 env.payload['clarification_reason'] = 'processing_error'
-                env.payload['clarification_message'] = "I had trouble processing your request. Could you please try again?"
+                env.payload['clarification_message'] = "I had trouble understanding your request. Could you please rephrase it?"
                 
         except json.JSONDecodeError as e:
             await self.log(env.conversation_id, f"JSON parsing error: {e}")
@@ -448,40 +441,33 @@ class GuardrailsAgent(BaseAgent):
         
         await self.log(env.conversation_id, f"Guardrails analysis: text='{text[:100]}...'")
 
-        response_json = await llm.generate_text_async('guardrails', text, prompt_options=prompt_options)
-        await self.log(env.conversation_id, f"LLM response: {response_json}")
+        response_text = await llm.generate_text_async('guardrails', text, prompt_options=prompt_options)
+        await self.log(env.conversation_id, f"LLM response: {response_text}")
         
         try:
-            if response_json and response_json.strip():
-                # Clean up response - sometimes LLM adds extra text around JSON
-                json_start = response_json.find('{')
-                json_end = response_json.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    clean_json = response_json[json_start:json_end]
-                    response_dict = json.loads(clean_json)
-                    
-                    if 'guardrails_passed' in response_dict:
-                        env.payload['guardrails_passed'] = response_dict['guardrails_passed']
-                        await self.log(env.conversation_id, f"Guardrails passed: {response_dict['guardrails_passed']}")
-                    elif 'clarification_reason' in response_dict:
-                        reason = response_dict['clarification_reason']
-                        message = response_dict.get('clarification_message', "Internal error: incomplete response from guardrails")
-                        env.payload['needs_clarification'] = True
-                        env.payload['clarification_reason'] = reason
-                        env.payload['clarification_message'] = message
-                        await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
-                    else:
-                        await self.log(env.conversation_id, "Error: LLM response missing required fields")
-                        env.payload['needs_clarification'] = True
-                        env.payload['clarification_reason'] = 'processing_error'
-                        env.payload['clarification_message'] = "Internal error: malformed response from guardrails"
+            response_text, response_dict = llm.parse_response(response_text)
+            
+            if response_dict:
+                if 'guardrails_passed' in response_dict:
+                    env.payload['guardrails_passed'] = response_dict['guardrails_passed']
+                    await self.log(env.conversation_id, f"Guardrails passed: {response_dict['guardrails_passed']}")
+                elif 'clarification_reason' in response_dict:
+                    reason = response_dict['clarification_reason']
+                    message = response_dict.get('clarification_message', "Internal error: incomplete response from guardrails")
+                    env.payload['needs_clarification'] = True
+                    env.payload['clarification_reason'] = reason
+                    env.payload['clarification_message'] = message
+                    await self.log(env.conversation_id, f"Requesting clarification: {reason} - {message}")
                 else:
-                    raise json.JSONDecodeError("No valid JSON found", response_dict, 0)
+                    await self.log(env.conversation_id, "Error: LLM response missing required fields")
+                    env.payload['needs_clarification'] = True
+                    env.payload['clarification_reason'] = 'processing_error'
+                    env.payload['clarification_message'] = "Internal error: malformed response from guardrails"
             else:
-                await self.log(env.conversation_id, "Error: Empty response from LLM")
+                await self.log(env.conversation_id, "Error: No JSON found in LLM response")
                 env.payload['needs_clarification'] = True
                 env.payload['clarification_reason'] = 'processing_error'
-                env.payload['clarification_message'] = "Internal error: empty response from guardrails"
+                env.payload['clarification_message'] = "Internal error: no JSON found in guardrails response"
                 
         except json.JSONDecodeError as e:
             await self.log(env.conversation_id, f"JSON parsing error: {e}")

@@ -837,6 +837,59 @@ def _get_prompt(type: str, action: str, model: str, provider: str,
                     return _format_prompt(raw, prompt_options)
     return ''
 
+def parse_response(response_text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Parse LLM response to extract both plain text and JSON dictionary if present.
+    
+    This function handles cases where LLM responses contain JSON wrapped with extra text.
+    It extracts the first valid JSON object found in the response and removes it from the text.
+    
+    Args:
+        response_text: Raw LLM response text
+        
+    Returns:
+        Tuple of (plain_text, json_dict):
+        - plain_text: The response text with JSON removed (only extra explanatory text)
+        - json_dict: Parsed JSON dictionary if found, None otherwise
+    """
+    if not response_text or not response_text.strip():
+        return response_text, None
+    
+    try:
+        # Look for JSON object in the response
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
+        
+        if json_start >= 0 and json_end > json_start:
+            clean_json = response_text[json_start:json_end]
+            response_dict = json.loads(clean_json)
+            
+            # Extract text before and after JSON, then combine
+            text_before = response_text[:json_start].strip()
+            text_after = response_text[json_end:].strip()
+            
+            # Combine non-JSON text parts
+            remaining_text = ""
+            if text_before:
+                remaining_text += text_before
+            if text_after:
+                if remaining_text:
+                    remaining_text += "\n\n" + text_after
+                else:
+                    remaining_text = text_after
+            
+            return remaining_text, response_dict
+        else:
+            # No JSON found
+            return response_text, None
+            
+    except json.JSONDecodeError:
+        # JSON parsing failed
+        return response_text, None
+    except Exception:
+        # Any other error
+        return response_text, None
+
 def get_embedding(text: str, model_provider: str = config.EMB_MODEL, prompt_options: Dict[str, Any] = {}) -> List[float]:
     """Generate text embedding using specified model and provider"""
     model, provider_name = _parse_model(model_provider)
