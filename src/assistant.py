@@ -165,7 +165,6 @@ class ManagerAgent(BaseAgent):
             env.target_role = "lang"
             env.payload["stage"] = "lang"
             return env
-
         
         if 'clarify_request' in env.payload:
             env.target_role = "clarification"

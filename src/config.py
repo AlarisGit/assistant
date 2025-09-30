@@ -112,6 +112,9 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", 11434))
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 
+# Proxy configuration: "SYSTEM" = use env vars, "NO" = disable proxy, or custom "ip:port"
+PROXY = os.getenv("PROXY", "SYSTEM").upper()
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
@@ -191,6 +194,27 @@ RATE_LIMITS = {
     # "gpt-5-nano@openai": {"rpm": 3000, "tpm": 180000},
     # "gemini-2.5-flash@google": {"rpm": 60, "tpm": 60000},
 }
+
+def get_proxy_settings() -> dict:
+    """
+    Get proxy settings based on PROXY configuration.
+    
+    Returns:
+        dict: Proxy settings for requests library
+            - PROXY="SYSTEM": Returns None (use environment variables)
+            - PROXY="NO": Returns {'http': None, 'https': None} (disable proxy)
+            - PROXY="ip:port": Returns {'http': 'http://ip:port', 'https': 'http://ip:port'}
+    """
+    if PROXY == "SYSTEM":
+        # Use environment variables (http_proxy, https_proxy)
+        return None
+    elif PROXY == "NO":
+        # Disable proxy completely
+        return {'http': None, 'https': None}
+    else:
+        # Custom proxy address (e.g., "127.0.0.1:10809")
+        proxy_url = f"http://{PROXY}" if not PROXY.startswith(('http://', 'https://')) else PROXY
+        return {'http': proxy_url, 'https': proxy_url}
 
 def print_config():
     config_vars = {}

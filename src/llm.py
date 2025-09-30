@@ -96,7 +96,21 @@ class OpenAIProvider(BaseProvider):
     
     def __init__(self, api_key: str):
         super().__init__(api_key)
-        self.client = OpenAI(api_key=api_key)
+        # Configure proxy for OpenAI client
+        import httpx
+        proxy_settings = config.get_proxy_settings()
+        if proxy_settings is not None:
+            # Custom proxy configuration
+            if proxy_settings.get('http') is None:
+                # Proxy disabled - use default httpx client without proxy
+                http_client = httpx.Client()
+            else:
+                # Custom proxy specified
+                http_client = httpx.Client(proxies=proxy_settings)
+            self.client = OpenAI(api_key=api_key, http_client=http_client)
+        else:
+            # PROXY=SYSTEM - use default client (respects environment variables)
+            self.client = OpenAI(api_key=api_key)
     
     def _is_reasoning_model(self, model: str) -> bool:
         """Check if model is a reasoning model"""
@@ -295,10 +309,16 @@ class OpenAIProvider(BaseProvider):
 
 
 class GoogleProvider(BaseProvider):
-    """Google Gemini provider with thinking budget configuration"""
+    """Google Gemini provider with thinking budget configuration
+    
+    Note: Google's genai SDK does not support direct proxy configuration.
+    Use PROXY=SYSTEM to respect environment variables, as the SDK will use them automatically.
+    """
     
     def __init__(self, api_key: str):
         super().__init__(api_key)
+        # Note: genai.configure() respects environment proxy variables (http_proxy, https_proxy)
+        # For custom proxy, set PROXY=SYSTEM and configure via environment variables
         genai.configure(api_key=api_key)
     
     def generate_text(self, prompt: str, system_prompt: str = '', history: List[Tuple[str, str]] = [], 
@@ -460,9 +480,10 @@ class OllamaProvider(BaseProvider):
         
         # Simple retry for transient 5xx
         last_exc = None
+        proxy_settings = config.get_proxy_settings()
         for attempt in range(3):
             try:
-                resp = requests.post(url, json=payload, timeout=timeout)
+                resp = requests.post(url, json=payload, timeout=timeout, proxies=proxy_settings)
                 if resp.status_code >= 500:
                     # Capture body for diagnostics, but avoid logging large payloads
                     body_preview = resp.text[:1000]
@@ -491,9 +512,10 @@ class OllamaProvider(BaseProvider):
     def generate_embedding(self, text: str, model: str = 'mxbai-embed-large', **kwargs) -> List[float]:
         """Generate embedding using Ollama API"""
         payload = {"model": model, "input": text}
+        proxy_settings = config.get_proxy_settings()
         
         try:
-            resp = requests.post(f"{self.base_url}/api/embed", json=payload)
+            resp = requests.post(f"{self.base_url}/api/embed", json=payload, proxies=proxy_settings)
             resp.raise_for_status()
             return resp.json()['embeddings'][0]
         except Exception as e:
@@ -551,7 +573,8 @@ class OllamaProvider(BaseProvider):
             try:
                 # Load image (URL or local)
                 if image.startswith(('http://', 'https://')):
-                    resp = requests.get(image, timeout=(5.0, 20.0))
+                    proxy_settings = config.get_proxy_settings()
+                    resp = requests.get(image, timeout=(5.0, 20.0), proxies=proxy_settings)
                     resp.raise_for_status()
                     img_bytes = resp.content
                 else:

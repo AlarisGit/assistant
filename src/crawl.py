@@ -572,7 +572,8 @@ def _fetch(url: str) -> tuple[int | None, str | None, dict]:
             status_code = 200
             raw = raw_cached
         else:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            proxy_settings = config.get_proxy_settings()
+            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True, proxies=proxy_settings)
             hdrs = dict(resp.headers)
             if not _is_html_response(resp):
                 return resp.status_code, None, hdrs
@@ -749,7 +750,8 @@ def crawl_site(base_url: str, start_path: str = "/", max_pages: int = DEFAULT_MA
                     # Try cache first
                     content, headers_final, fpath = _cache_get_image(img_url)
                     if content is None:
-                        r = requests.get(img_url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, stream=True)
+                        proxy_settings = config.get_proxy_settings()
+                        r = requests.get(img_url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, stream=True, proxies=proxy_settings)
                         content = r.content
                         headers_final = dict(r.headers)
                         _cache_set_image(img_url, content, headers_final)

@@ -1,0 +1,4 @@
+export http_proxy=http://127.0.0.1:10809
+export https_proxy=http://127.0.0.1:10809
+export all_proxy=http://127.0.0.1:10809
+export socks_proxy=socks5h://127.0.0.1:10808
