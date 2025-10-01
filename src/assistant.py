@@ -645,7 +645,7 @@ class ResponseAgent(BaseAgent):
         text = env.payload.get("canonical_question", env.payload.get("text_eng", env.payload.get("text", "")))
         prompt_options = {'language': language, 'current_time': util.get_current_time()}
         await self.log(env.conversation_id, f"Preparing response in {language} for text: {text}")
-        env.payload["response"] = await llm.generate_text_async('sample', text, history, prompt_options=prompt_options)
+        env.payload["response"] = await llm.generate_text_async('response', text, history, prompt_options=prompt_options)
 
         return env
 

@@ -831,7 +831,125 @@ def _extract_placeholders(s: str) -> set:
             names.add(field_name.split('.')[0].split('[')[0])
     return names
 
+def _process_includes(template: str, base_dir: str) -> str:
+    """
+    Process {inc:filename} includes in template.
+    
+    - {inc:persona.md} - loads from same directory as template
+    - {inc:common/persona.md} - loads from relative path within prompts dir
+    
+    Args:
+        template: Template string with potential includes
+        base_dir: Directory of the template file for resolving relative paths
+        
+    Returns:
+        Template with includes resolved
+    """
+    import re
+    
+    # Pattern to match {inc:path/to/file.md}
+    include_pattern = r'\{inc:([^}]+)\}'
+    
+    def replace_include(match):
+        include_path = match.group(1).strip()
+        
+        # Resolve the file path
+        if os.path.isabs(include_path):
+            # Absolute path
+            file_path = include_path
+        else:
+            # Relative to base_dir (template directory)
+            file_path = os.path.join(base_dir, include_path)
+        
+        # Read the included file
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Recursively process includes in the included file
+                return _process_includes(content, os.path.dirname(file_path))
+        except FileNotFoundError:
+            logger.warning(f"Include file not found: {file_path}")
+            return f"[Include not found: {include_path}]"
+        except Exception as e:
+            logger.warning(f"Error loading include {include_path}: {e}")
+            return f"[Include error: {include_path}]"
+    
+    return re.sub(include_pattern, replace_include, template)
+
+def _process_macros(template: str, prompt_options: Optional[Dict[str, Any]]) -> str:
+    """
+    Process Python macro expressions in template.
+    
+    Supports:
+    - {util.get_current_time()} - calls Python functions
+    - {datetime.now().strftime('%Y-%m-%d')} - any Python expression
+    - {variable_name} - regular variable substitution (falls back to prompt_options)
+    
+    Args:
+        template: Template string with potential macros
+        prompt_options: Dictionary of variables for substitution
+        
+    Returns:
+        Template with macros evaluated
+    """
+    import re
+    import util
+    from datetime import datetime as dt_class
+    
+    # Pattern to match {expression} - but we'll be smart about it
+    macro_pattern = r'\{([^}]+)\}'
+    
+    def replace_macro(match):
+        expression = match.group(1).strip()
+        
+        # Check if it looks like a Python expression (has function call or method access)
+        # Examples: util.get_current_time(), datetime.now(), config.VERSION
+        is_expression = (
+            '(' in expression or  # Function call
+            ('.' in expression and not expression.split('.')[0] in (prompt_options or {}))  # Attribute/method access not in variables
+        )
+        
+        if is_expression:
+            # This looks like a Python expression - evaluate it
+            try:
+                # Create a safe evaluation context with limited builtins
+                safe_globals = {
+                    '__builtins__': {
+                        # Allow safe builtins for common operations
+                        'len': len,
+                        'str': str,
+                        'int': int,
+                        'float': float,
+                        'bool': bool,
+                        'list': list,
+                        'dict': dict,
+                        'tuple': tuple,
+                    },
+                    'util': util,
+                    'datetime': dt_class,
+                    'config': config,
+                }
+                # Add prompt_options as variables
+                safe_locals = dict(prompt_options or {})
+                
+                result = eval(expression, safe_globals, safe_locals)
+                return str(result)
+            except Exception as e:
+                logger.warning(f"Error evaluating macro '{expression}': {e}")
+                return f"{{{{Error: {expression}}}}}"
+        else:
+            # Simple variable - return placeholder for standard format_map
+            return f"{{{expression}}}"
+    
+    return re.sub(macro_pattern, replace_macro, template)
+
 def _format_prompt(template: str, prompt_options: Optional[Dict[str, Any]]) -> str:
+    """
+    Format prompt template with variable substitution.
+    Uses _SafeDict to avoid KeyError on missing variables.
+    
+    Note: Macros and includes should be processed before calling this function.
+    """
     try:
         return (template or '').format_map(_SafeDict(prompt_options or {}))
     except Exception:
@@ -840,7 +958,16 @@ def _format_prompt(template: str, prompt_options: Optional[Dict[str, Any]]) -> s
 
 def _get_prompt(type: str, action: str, model: str, provider: str, 
                 prompt_options: Optional[Dict[str, Any]] = None) -> str:
-    """Get prompt template with hierarchical fallback and optional formatting"""
+    """
+    Get prompt template with hierarchical fallback and optional formatting.
+    
+    Supports:
+    1. File includes: {inc:filename.md} or {inc:path/to/file.md}
+    2. Python macros: {util.get_current_time()} or {datetime.now().strftime('%Y-%m-%d')}
+    3. Variable substitution: {variable_name}
+    
+    Processing order: includes → macros → variables
+    """
     if os.path.exists(config.PROMPTS_DIR):
         for name in [
             f'{type}_{action}_{provider}_{model}',
@@ -857,7 +984,11 @@ def _get_prompt(type: str, action: str, model: str, provider: str,
             if os.path.exists(prompt_path):
                 with open(prompt_path, 'r', encoding='utf-8') as f:
                     raw = f.read()
-                    return _format_prompt(raw, prompt_options)
+                    
+                    # Process template in order: includes → macros → variables
+                    template = _process_includes(raw, os.path.dirname(prompt_path))
+                    template = _process_macros(template, prompt_options)
+                    return _format_prompt(template, prompt_options)
     return ''
 
 def parse_response(response_text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
