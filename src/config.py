@@ -26,6 +26,7 @@ VERSION = os.getenv("VERSION", "2.4.0")
 
 # --- Logging ---
 LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper()
+print(f"LOG_LEVEL_STR: {LOG_LEVEL_STR}", file=sys.stderr)
 LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
 LOG_FORMAT = '%(asctime)s - %(name)-10s : %(lineno)3s - %(levelname)-5s - %(message)s'
 # Ensure log directory exists if file logging is used later

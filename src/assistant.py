@@ -52,6 +52,7 @@ import config
 from agent import process_request, broadcast_command, BaseAgent, Envelope
 import llm
 import util
+import qdrant
 
 logger = logging.getLogger(__name__)
 
@@ -178,17 +179,22 @@ class ManagerAgent(BaseAgent):
 
         if stage == "translation":
             env.target_role = "essence"
-            env.payload["stage"] = "essence" #can be overriden by manager if clarification needed
+            env.payload["stage"] = "essence"
             return env
         
         if stage == "essence":
             env.target_role = "guardrails"
-            env.payload["stage"] = "guardrails" #can be overriden by manager if clarification needed
+            env.payload["stage"] = "guardrails" 
             return env
         
         if stage == "guardrails":
+            env.target_role = "search"
+            env.payload["stage"] = "search"
+            return env
+        
+        if stage == "search":
             env.target_role = "response"
-            env.payload["stage"] = "response" #can be overriden by manager if clarification needed
+            env.payload["stage"] = "response"
             return env
         
         if stage in ["response", "clarification"]:
@@ -480,36 +486,29 @@ class SearchAgent(BaseAgent):
         
         await self.log(env.conversation_id, f"Search request: question='{canonical_question[:50]}...' text_eng='{text_eng[:50]}...'")
         
-        # TODO: Implement actual multi-level search logic
-        # For now, return placeholder results with quality assessment
-        search_results = [
-            {
-                "content": f"Sample search result for: {canonical_question}",
-                "source": "https://example.com/doc1",
-                "score": 0.85,
-                "metadata": {"crumbs": ["Documentation", "API"]}
-            }
-        ]
-        
-        avg_score = 0.85
-        search_quality = "excellent" if avg_score > 0.8 else "good" if avg_score > 0.6 else "poor"
+        search_results = await qdrant.search_chunks(canonical_question, k=10, threshold=0.3)
+
+        if len(search_results) > 0:
+            scores = [x["score"] for x in search_results]
+            min_score = min(scores)
+            avg_score = sum(scores) / len(scores)
+            max_score = max(scores)
+        else:
+            min_score = avg_score = max_score = 0.0
         
         env.payload["search_results"] = search_results
-        env.payload["search_context"] = f"Context for query: {canonical_question}"
-        env.payload["search_stats"] = {
-            "total_results": len(search_results),
-            "used_results": len(search_results),
-            "context_length": 100,
-            "avg_score": avg_score
-        }
-        env.payload["search_quality"] = search_quality
-        
-        # Request clarification if search quality is poor
-        if search_quality == "poor":
+        if len(search_results) == 0:
+            env.payload["clarify_request"] = "no_relevant_documents"
+        elif max_score < 0.5:
+            env.payload["clarify_request"] = "poor_search_results"
+        elif max_score < 0.6:
             env.payload["clarify_request"] = "insufficient_details"
-            await self.log(env.conversation_id, "Requesting clarification: poor search quality")
-        else:
-            await self.log(env.conversation_id, f"Search completed: {len(search_results)} results, quality: {search_quality}")
+        
+        await self.log(env.conversation_id, f"Search completed: {len(search_results)} results, score={min_score:.2f}/{avg_score:.2f}/{max_score:.2f}")
+        logger.debug(f"{env.conversation_id}: \n{json.dumps(search_results, ensure_ascii=False, indent=4)}")
+        for result in search_results:
+            chunk_id = result['payload'].get('chunk_id', result['id'])
+            await self.log(env.conversation_id, f"Search result: {chunk_id} - {result['score']:.2f}")
         
         return env
 
@@ -557,66 +556,6 @@ class ClarificationAgent(BaseAgent):
         
         return env
 
-
-class AugmentationAgent(BaseAgent):
-    """Craft enhanced LLM prompts with search context.
-    
-    Responsibilities:
-    - Build enhanced prompts with documentation context
-    - Include source attribution from source URLs
-    - Add breadcrumb navigation context from crumbs
-    - Structure context for optimal LLM performance
-    - Ensure all necessary context is included
-    
-    Role: "augmentation" (auto-derived from class name)
-    """
-    
-    async def process(self, env: Envelope) -> Envelope:
-        """Process prompt augmentation request.
-        
-        Reads: search_results, search_context, canonical_question, language, text
-        Writes: augmented_prompt, source_references, context_structure
-        """
-        # Extract input attributes
-        search_results = env.payload.get("search_results", [])
-        search_context = env.payload.get("search_context", "")
-        canonical_question = env.payload.get("canonical_question", "")
-        language = env.payload.get("language", "en")
-        text = env.payload.get("text", canonical_question)  # Original user query
-        
-        await self.log(env.conversation_id, f"Prompt augmentation: {len(search_results)} results for '{canonical_question[:50]}...' in {language}")
-        
-        # TODO: Implement actual prompt augmentation logic
-        # For now, create basic augmented prompt
-        context_parts = []
-        source_refs = []
-        
-        for result in search_results:
-            context_parts.append(result.get("content", ""))
-            source_refs.append({
-                "url": result.get("source", ""),
-                "crumbs": result.get("metadata", {}).get("crumbs", [])
-            })
-        
-        env.payload["augmented_prompt"] = f"""
-Context: {' '.join(context_parts)}
-
-User Question: {text}
-
-Please provide a comprehensive answer based on the provided context.
-"""
-        env.payload["source_references"] = source_refs
-        env.payload["context_structure"] = {
-            "context_length": len(' '.join(context_parts)),
-            "source_count": len(source_refs),
-            "language": language
-        }
-        
-        await self.log(env.conversation_id, f"Augmented prompt created: {env.payload['context_structure']['context_length']} chars, {len(source_refs)} sources")
-        
-        return env
-
-
 class ResponseAgent(BaseAgent):
     """Generate final response using flagship LLM with constraints.
     
@@ -634,7 +573,7 @@ class ResponseAgent(BaseAgent):
     async def process(self, env: Envelope) -> Envelope:
         """Process response generation request.
         
-        Reads: augmented_prompt, language, canonical_question, conversation history from memory
+        Reads: language, canonical_question, conversation history from memory
         Writes: response, sources_used, generation_confidence, generation_error (if any)
         + Universal clarification attributes (when documentation insufficient)
         """
@@ -648,27 +587,6 @@ class ResponseAgent(BaseAgent):
         env.payload["response"] = await llm.generate_text_async('response', text, history, prompt_options=prompt_options)
 
         return env
-
-        #keep this code for reference       
-        # Extract input attributes
-        augmented_prompt = env.payload.get("augmented_prompt", "")
-        language = env.payload.get("language", "English")
-        canonical_question = env.payload.get("canonical_question", "")
-        
-        await self.log(env.conversation_id, f"Response generation: prompt_length={len(augmented_prompt)} language={language}")
-        
-        if len(augmented_prompt.strip()) < 50:
-            # Request clarification when documentation context is insufficient
-            env.payload["clarify_request"] = "insufficient_context"
-            await self.log(env.conversation_id, "Requesting clarification: insufficient documentation context")
-        else:
-            env.payload["response"] = f"This is a placeholder response for: {canonical_question}"
-            env.payload["sources_used"] = env.payload.get("source_references", [])
-            env.payload["generation_confidence"] = 0.8
-            await self.log(env.conversation_id, f"Response generated: {len(env.payload['response'])} chars, confidence: {env.payload['generation_confidence']}")
-        
-        return env
-
 
 class QualityAgent(BaseAgent):
     """Final response validation with return capability.
@@ -745,8 +663,6 @@ _search1 = SearchAgent()          # 2 instances - semantic search + LLM ranking
 _search2 = SearchAgent()
 _clarification1 = ClarificationAgent()  # 2 instances - LLM ambiguity detection
 _clarification2 = ClarificationAgent()
-_augmentation1 = AugmentationAgent()    # 2 instances - LLM prompt engineering
-_augmentation2 = AugmentationAgent()
 _response1 = ResponseAgent()      # 2 instances - flagship LLM generation
 _response2 = ResponseAgent()
 _quality1 = QualityAgent()        # 2 instances - LLM validation

@@ -7,9 +7,10 @@ import random
 import hashlib
 import datetime
 from qdrant_client import QdrantClient
+from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import uuid
-from llm import get_embedding
+from llm import get_embedding_async
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -18,8 +19,13 @@ _qdrant_url = config.QDRANT_URL
 _qdrant_api_key = config.QDRANT_API_KEY
 _qdrant_collection_name = config.QDRANT_COLLECTION_NAME
 
-# Initialize Qdrant client
+# Initialize Qdrant clients (sync for backward compatibility, async for async operations)
 _qdrant_client = QdrantClient(
+    url=_qdrant_url,
+    api_key=_qdrant_api_key if _qdrant_api_key else None
+)
+
+_qdrant_client_async = AsyncQdrantClient(
     url=_qdrant_url,
     api_key=_qdrant_api_key if _qdrant_api_key else None
 )
@@ -94,7 +100,7 @@ def _ensure_collection_exists():
         logger.error(f"Failed to ensure collection exists: {str(e)}")
         raise
 
-def search_chunks(query: str, k: int = 20, threshold: float = 0.5) -> List[Dict[str, Any]]:
+async def search_chunks(query: str, k: int = 20, threshold: float = 0.5) -> List[Dict[str, Any]]:
     """Search for similar chunks in Qdrant.
     
     Args:
@@ -106,9 +112,9 @@ def search_chunks(query: str, k: int = 20, threshold: float = 0.5) -> List[Dict[
         List of matching chunks with their payloads and scores
     """
     try:
-        query_embedding = get_embedding(query)
+        query_embedding = await get_embedding_async(query)
         
-        search_result = _qdrant_client.search(
+        search_result = await _qdrant_client_async.search(
             collection_name=_qdrant_collection_name,
             query_vector=query_embedding,
             limit=k,
